@@ -85,12 +85,7 @@ int APS5_VABI scePlayGoGetEta(int handle, const uint16_t* chunk_ids, uint32_t nu
 }
 
 int APS5_VABI scePlayGoGetInstallChunkId(int handle, uint16_t* out_chunk_id_list, uint32_t number_of_entries, uint32_t* out_entries) {
- (void)handle;
- (void)out_chunk_id_list;
- (void)number_of_entries;
- (void)out_entries;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+    return scePlayGoGetChunkId(handle, out_chunk_id_list, number_of_entries, out_entries);
 }
 
 int APS5_VABI scePlayGoGetInstallSpeed(int handle, int32_t* out_speed) {
