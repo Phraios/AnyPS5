@@ -1,6 +1,14 @@
 name: Release
 
 on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release-Tag (z. B. v1.0.0)'
+        required: true
+        type: string
+        default: 'v1.0.0'
+  # Falls er weiterhin auch automatisch bei Tags starten soll:
   push:
     tags: ['v*']
 
@@ -12,7 +20,8 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  RELEASE_TAG: ${{ github.ref_name }}
+  # Nutzt entweder das manuell eingegebene Tag oder das automatische Git-Tag bei einem Push
+  RELEASE_TAG: ${{ github.event.inputs.version || github.ref_name }}
   CONFIGURE: >-
     -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
     -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++
