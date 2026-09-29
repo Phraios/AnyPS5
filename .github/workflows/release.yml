@@ -130,6 +130,6 @@ jobs:
           python tools/package_release.py --docs docs/user --output dist
           chmod +x "dist/relinker-$RELEASE_TAG"
       - name: Create draft and upload files
-        run: gh release create "$RELEASE_TAG" dist/* --verify-tag --draft --title "$RELEASE_TAG" --generate-notes
+        run: gh release create "$RELEASE_TAG" dist/* --draft --title "$RELEASE_TAG" --generate-notes
       - name: Publish complete release
         run: gh release edit "$RELEASE_TAG" --draft=false
