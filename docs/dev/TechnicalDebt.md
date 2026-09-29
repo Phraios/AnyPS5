@@ -39,4 +39,4 @@ Throughout the project, every function at every stage either **does exactly what
 - The Linux placement of the `--to-intel` stubs in the [ELF patcher](../../core/relinker/elfpatcher/src/linux/LinuxElfPatcher.cpp) is covered only by a synthetic test.
 - The libc [SSE4a trap emulation](../../core/libs/prx/libc/src/specifics/windows/Sse4aEmulation.hpp) on Windows is superseded by `--to-intel` and remains only until the relinked title has been verified without it.
 - `--to-intel` lowerings that need a stub section are rejected for `sce_module` guest modules: the [guest module builder](../../core/relinker/relinker/src/guest/GuestModuleBuilder.cpp) does not pass stub sites to the [guest module writer](../../core/relinker/elfpatcher/include/elfpatcher/general/GuestModuleWriter.hpp).
-- The game can expect its modified prx from the `sce_module`/`sce_modules` folder - this support is not implemented.
+- [libScePlayerInvitationDialog](../../core/libs/prx/libScePlayerInvitationDialog/libScePlayerInvitationDialog.cpp) simulates dialog completion without displaying UI or sending invitations; its parameter ABI remains unverified.
