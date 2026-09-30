@@ -46,13 +46,9 @@ struct AudioOut2Port {
     std::uint32_t dataFormat = 0;
     std::uint32_t samplingFreq = 0;
     std::uint32_t flags = 0;
-    // Channel count decoded from dataFormat; 0 when the format is not understood (the port is then
-    // not rendered). Samples are float.
     std::uint32_t channels = 0;
-    // The PCM buffer (one grain, float, interleaved) the title last handed over through the data
-    // attribute. It is guest memory the title rewrites every tick, so it is read when the context
-    // mixes, not when it is set.
-    const float* data = nullptr;
+    bool int16 = false;
+    const void* data = nullptr;
     float volume[AUDIO_OUT2_PORT_CHANNELS_MAX] = {1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f};
     std::uint64_t dataSets = 0;
     std::uint64_t attributeTraces = 0;

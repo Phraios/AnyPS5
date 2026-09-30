@@ -40,10 +40,31 @@ struct ColorTarget {
     // DCC metadata of a compressed target (CB_COLOR_INFO DCC_ENABLE), or 0 (see DccMetadata.hpp).
     std::uint64_t dccAddress = 0;
     bool dccAlphaOnMsb = false;
+    std::uint64_t surfaceAddress = 0;
+    VkExtent2D surfaceExtent{};
+    std::uint32_t mipCount = 1;
+    std::uint32_t mip = 0;
+    bool mipTail = false;
+};
+
+struct DepthTarget {
+    std::uint64_t address;
+    std::uint64_t stencilAddress;
+    VkExtent2D extent;
+    VkFormat format;
+    float clearDepth;
+    std::uint8_t clearStencil;
 };
 
 struct State {
     ShaderStages stages;
+    std::optional<DepthTarget> depth;
+    bool depthTest = false;
+    bool depthWrite = false;
+    VkCompareOp depthCompare = VK_COMPARE_OP_ALWAYS;
+    bool stencilTest = false;
+    VkStencilOpState stencilFront{};
+    VkStencilOpState stencilBack{};
     // MRT slot 0; `colors`/`blends` hold every written slot, attachment i being slot i.
     ColorTarget color;
     std::vector<ColorTarget> colors;
@@ -52,6 +73,7 @@ struct State {
     bool rectList = false;
     VkExtent2D renderExtent;
     VkPrimitiveTopology topology;
+    bool primitiveRestart = false;
     VkViewport viewport;
     bool negativeOneToOne;
     bool depthClamp = false;
@@ -64,6 +86,7 @@ struct State {
 
 ShaderStages DecodeShaderStages(const QueueState& queue);
 State DecodeState(const QueueState& queue);
+std::array<std::uint8_t, 8> ExportMappings(const State& state);
 // The message DecodeState (or the pixel stage decode after it) would throw for the register rules
 // this precheck covers, evaluated without exceptions before the draw is decoded; empty when they
 // pass (DecodeState still checks everything). A register a rule needs that is absent is no verdict.
@@ -99,11 +122,9 @@ struct DrawKeyRange {
     std::uint32_t first;
     std::uint32_t count;
 };
-inline constexpr std::array<DrawKeyRange, 38> DrawKeyRegisters{{
-    // PA_SC_SCREEN_SCISSOR, the window offset/scissor and clip rect, the edge rule, the hardware
-    // screen offset, CB_TARGET_MASK/CB_SHADER_MASK, the generic and viewport 0 scissors, the
-    // viewport 0 depth clamp, the blend constants, the viewport 0 transform.
-    {RegisterBank::Context, 0x00c, 2}, {RegisterBank::Context, 0x080, 4}, {RegisterBank::Context, 0x08c, 4}, {RegisterBank::Context, 0x090, 2}, {RegisterBank::Context, 0x094, 2}, {RegisterBank::Context, 0x0b4, 2}, {RegisterBank::Context, 0x105, 4}, {RegisterBank::Context, 0x10f, 6},
+inline constexpr std::array<DrawKeyRange, 44> DrawKeyRegisters{{
+    {RegisterBank::Context, 0x000, 1}, {RegisterBank::Context, 0x002, 1}, {RegisterBank::Context, 0x007, 1}, {RegisterBank::Context, 0x00a, 4}, {RegisterBank::Context, 0x010, 6}, {RegisterBank::Context, 0x01a, 4},
+    {RegisterBank::Context, 0x080, 4}, {RegisterBank::Context, 0x08c, 4}, {RegisterBank::Context, 0x090, 2}, {RegisterBank::Context, 0x094, 2}, {RegisterBank::Context, 0x0b4, 2}, {RegisterBank::Context, 0x105, 4}, {RegisterBank::Context, 0x10b, 3}, {RegisterBank::Context, 0x10f, 6},
     // SPI_PS_INPUT_CNTL_0..31, SPI_PS_INPUT_ENA/ADDR, SPI_PS_IN_CONTROL, SPI_SHADER_POS/Z/COL_FORMAT,
     // CB_BLEND0..7_CONTROL, GE_MAX_OUTPUT_PER_SUBGROUP.
     {RegisterBank::Context, 0x191, 32}, {RegisterBank::Context, 0x1b3, 2}, {RegisterBank::Context, 0x1b6, 1}, {RegisterBank::Context, 0x1c3, 3}, {RegisterBank::Context, 0x1e0, 8}, {RegisterBank::Context, 0x1ff, 1},

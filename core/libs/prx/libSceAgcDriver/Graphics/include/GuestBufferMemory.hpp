@@ -6,6 +6,7 @@
 #include "prx/libc/include/GuestAllocations.hpp"
 #include <memory>
 #include <optional>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -123,6 +124,23 @@ struct AddressSpaceStats {
 };
 AddressSpaceStats AddressSpaceCounters();
 
+struct MirrorStats {
+    std::uint64_t heapMirrors = 0;
+    std::uint64_t heapBytes = 0;
+    std::uint64_t rebuilds = 0;
+    std::uint64_t blocksCopied = 0;
+    std::uint64_t heapRefills = 0;
+};
+MirrorStats MirrorCounters();
+
+struct AddressCopy {
+    std::uint64_t begin;
+    std::uint64_t end;
+    std::uint64_t committed;
+    const char* reason;
+};
+std::string AddressCopyOverflow(std::vector<AddressCopy> copies, std::uint64_t limit);
+
 class GuestBufferMemory {
 public:
     explicit GuestBufferMemory(const Context& context);
@@ -163,7 +181,7 @@ public:
     void Upload(bool addressable);
     void UploadPrepare(bool addressable);
     void UploadFinish(bool addressable);
-    VkDescriptorBufferInfo Descriptor(std::uint64_t address, std::size_t bytes) const;
+    VkDescriptorBufferInfo Descriptor(std::uint64_t address, std::size_t bytes, std::uint32_t& adjustment) const;
     std::vector<ShaderRecompiler::BdaAbi::Range> AddressRanges() const;
     // The BDA table of the cached address space when it serves this upload alone (an address-based
     // build with no region outside it): its ranges, immutable while the space lives, and the
@@ -298,6 +316,7 @@ private:
     // Records the import-to-buffer copies of the given gpuCopy regions into the open batch, with
     // the barriers that order them after earlier recorded writes and before the shaders reading them.
     void recordGpuCopies(std::span<Region* const> copies, bool addressable);
+    void takeHeapReferences();
     Context context;
     bool stagingAllowed = false;
     GuestAllocations::Lease lease;
@@ -312,6 +331,7 @@ private:
     // regions follow the registry's order), so AddSnapshot can search instead of scanning.
     bool regionsSorted = false;
     std::vector<std::pair<std::uint64_t, std::uint64_t>> writes;
+    std::vector<std::pair<std::uint64_t, std::vector<std::byte>>> heapReferences;
     // UploadPrepare ran (regions are frozen); `uploaded` once UploadFinish ran.
     bool prepared = false;
     bool uploaded = false;

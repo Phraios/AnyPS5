@@ -59,9 +59,11 @@ add_library(libSceAgcDriver SHARED EXCLUDE_FROM_ALL
         ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/AspectFit.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/PresentationScaler.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/Draw.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/DepthSurface.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/ColorTargetLayout.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/ColorTargetTransfer.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/Pipeline.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/PipelineCache.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/Resources.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/Recorder.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/ShaderInputState.cpp
@@ -157,6 +159,22 @@ target_link_libraries(agc_shader_memory_tests PRIVATE shader_recompiler_agc_driv
 set_target_properties(agc_shader_memory_tests PROPERTIES CXX_EXTENSIONS OFF)
 configure_windows_unwind(agc_shader_memory_tests)
 
+add_executable(agc_structurizer_tests EXCLUDE_FROM_ALL tests/Structurizer.cpp)
+target_link_libraries(agc_structurizer_tests PRIVATE shader_recompiler_agc_driver libc)
+set_target_properties(agc_structurizer_tests PROPERTIES CXX_EXTENSIONS OFF)
+configure_windows_unwind(agc_structurizer_tests)
+
+add_executable(agc_dpp_write_tests EXCLUDE_FROM_ALL tests/DppWrite.cpp)
+target_link_libraries(agc_dpp_write_tests PRIVATE shader_recompiler_agc_driver libc)
+set_target_properties(agc_dpp_write_tests PROPERTIES CXX_EXTENSIONS OFF)
+configure_windows_unwind(agc_dpp_write_tests)
+
+add_executable(agc_shader_disk_cache_tests EXCLUDE_FROM_ALL tests/ShaderDiskCache.cpp)
+target_include_directories(agc_shader_disk_cache_tests PRIVATE ${LIBS_INCLUDE_DIR})
+target_link_libraries(agc_shader_disk_cache_tests PRIVATE shader_recompiler_agc_driver libc)
+set_target_properties(agc_shader_disk_cache_tests PROPERTIES CXX_EXTENSIONS OFF)
+configure_windows_unwind(agc_shader_disk_cache_tests)
+
 add_executable(agc_driver_flip_tests EXCLUDE_FROM_ALL
         tests/Flip.cpp
 )
@@ -219,6 +237,7 @@ add_executable(agc_driver_graphics_tests EXCLUDE_FROM_ALL
         tests/GuestSamplerResource.cpp
         tests/TextureDetiler.cpp
         Graphics/src/Draw.cpp
+        Graphics/src/DepthSurface.cpp
         Graphics/src/Pipeline.cpp
         Graphics/src/State.cpp
         Graphics/src/ColorTargetLayout.cpp
@@ -239,8 +258,11 @@ add_executable(agc_driver_graphics_tests EXCLUDE_FROM_ALL
         Graphics/src/Texture.cpp
         Graphics/src/UnitShadow.cpp
         Graphics/src/Sampler.cpp
+        Graphics/src/Recorder.cpp
+        Graphics/src/ShaderInputState.cpp
         ${agcTextureDetileShaderHeader}
         Execution/src/GuestMemory.cpp
+        Execution/src/Pm4.cpp
 )
 
 target_include_directories(agc_driver_graphics_tests PRIVATE
@@ -282,10 +304,11 @@ set_target_properties(agc_driver_bda_device_tests PROPERTIES CXX_EXTENSIONS OFF)
 configure_windows_unwind(agc_driver_bda_device_tests)
 
 if(BUILD_TESTING)
-    foreach(agcTest IN ITEMS agc_driver_tests agc_shader_memory_tests agc_driver_flip_tests agc_driver_pm4_tests)
+    foreach(agcTest IN ITEMS agc_driver_tests agc_shader_memory_tests agc_structurizer_tests agc_dpp_write_tests agc_shader_disk_cache_tests agc_driver_flip_tests agc_driver_pm4_tests)
         string(REGEX REPLACE "_tests$" "" agcTestName "${agcTest}")
         set_target_properties(${agcTest} PROPERTIES EXCLUDE_FROM_ALL OFF)
         add_test(NAME ${agcTestName} COMMAND ${agcTest})
+        set_tests_properties(${agcTestName} PROPERTIES ENVIRONMENT "ANYPS5_NO_SHADER_CACHE=1")
         if(WIN32)
             set_tests_properties(${agcTestName} PROPERTIES ENVIRONMENT_MODIFICATION
                 "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
@@ -327,9 +350,11 @@ if(AGC_BUILD_VISUAL_TEST)
             Execution/src/GuestMemory.cpp
             Execution/src/BdaFeatures.cpp
             Graphics/src/Draw.cpp
+            Graphics/src/DepthSurface.cpp
             Graphics/src/ColorTargetLayout.cpp
             Graphics/src/ColorTargetTransfer.cpp
             Graphics/src/Pipeline.cpp
+            Graphics/src/PipelineCache.cpp
             Graphics/src/Resources.cpp
             Graphics/src/ShaderResources.cpp
             Graphics/src/ShaderAddressResources.cpp

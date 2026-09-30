@@ -343,7 +343,7 @@ void unchangedSinceTests() {
     constexpr std::size_t bytes = 65536;
     void* block = GuestArena::GuestArenaAllocate_nid_postfix(bytes, bytes);
 #ifdef _WIN32
-    Require(VirtualAlloc(block, bytes, MEM_COMMIT, PAGE_READWRITE) != nullptr, "cannot commit the arena block");
+    GuestArena::GuestArenaCommit_nid_postfix(block, bytes, PAGE_READWRITE, bytes);
 #endif
     auto* words = static_cast<volatile std::uint32_t*>(block);
     const auto address = reinterpret_cast<std::uint64_t>(block);
@@ -371,7 +371,7 @@ void unchangedSinceTests() {
     CollectWritesUncached(address, 4);
     Require(!UnchangedSinceCollected(address, 4, generation3), "(6) a CPU write collected by another caller is not seen");
 #ifdef _WIN32
-    VirtualFree(block, bytes, MEM_DECOMMIT);
+    GuestArena::GuestArenaReset_nid_postfix(block, bytes);
 #endif
     GuestArena::GuestArenaRelease_nid_postfix(block, bytes);
 }
@@ -389,13 +389,13 @@ void keyProofTests(const Device& device, Recorder& recorder) {
     constexpr std::size_t bytes = 65536;
     void* block = GuestArena::GuestArenaAllocate_nid_postfix(bytes, bytes);
 #ifdef _WIN32
-    Require(VirtualAlloc(block, bytes, MEM_COMMIT, PAGE_READWRITE) != nullptr, "cannot commit the arena block");
+    GuestArena::GuestArenaCommit_nid_postfix(block, bytes, PAGE_READWRITE, bytes);
 #endif
     struct Release {
         void* block;
         ~Release() {
 #ifdef _WIN32
-            VirtualFree(block, bytes, MEM_DECOMMIT);
+            GuestArena::GuestArenaReset_nid_postfix(block, bytes);
 #endif
             GuestArena::GuestArenaRelease_nid_postfix(block, bytes);
         }
@@ -476,7 +476,7 @@ void closeRaceTests(const Device& device, Recorder& recorder) {
     constexpr std::size_t bytes = 1u << 20;
     void* block = GuestArena::GuestArenaAllocate_nid_postfix(bytes, 65536);
 #ifdef _WIN32
-    Require(VirtualAlloc(block, bytes, MEM_COMMIT, PAGE_READWRITE) != nullptr, "cannot commit the arena block");
+    GuestArena::GuestArenaCommit_nid_postfix(block, bytes, PAGE_READWRITE, bytes);
 #endif
     const auto base = reinterpret_cast<std::uint64_t>(block);
     // Late in the range, so the walker is usually still ahead of the page when the store lands.
@@ -510,7 +510,7 @@ void closeRaceTests(const Device& device, Recorder& recorder) {
     recorder.Sync();
     Require(!Recorder::LookupLabel(label, 4, 5).has_value(), "(8) the entry outlived its batch");
 #ifdef _WIN32
-    VirtualFree(block, bytes, MEM_DECOMMIT);
+    GuestArena::GuestArenaReset_nid_postfix(block, bytes);
 #endif
     GuestArena::GuestArenaRelease_nid_postfix(block, bytes);
 }
@@ -722,13 +722,13 @@ void unitShadowTests(const Device& device, Recorder& recorder) {
     void* block = GuestArena::GuestArenaAllocate_nid_postfix(bytes, 65536);
     Require(block != nullptr, "cannot allocate the shadow test block");
 #ifdef _WIN32
-    Require(VirtualAlloc(block, bytes, MEM_COMMIT, PAGE_READWRITE) != nullptr, "cannot commit the shadow test block");
+    GuestArena::GuestArenaCommit_nid_postfix(block, bytes, PAGE_READWRITE, bytes);
 #endif
     struct Release {
         void* block;
         ~Release() {
 #ifdef _WIN32
-            VirtualFree(block, bytes, MEM_DECOMMIT);
+            GuestArena::GuestArenaReset_nid_postfix(block, bytes);
 #endif
             GuestArena::GuestArenaRelease_nid_postfix(block, bytes);
         }

@@ -203,6 +203,8 @@ struct Submission {
     // submission trusts only labels the recorder noted with a newer stamp (see Recorder::NoteLabel).
     std::uint64_t received = 0;
     std::chrono::steady_clock::time_point enqueuedAt{};
+    const std::uint32_t* rewindTail = nullptr;
+    std::size_t rewindWords = 0;
 };
 
 std::uint32_t readRegister(const Registers& registers, std::uint32_t offset) {
@@ -524,6 +526,106 @@ private:
 
 public:
 
+    static void copyCommands(Submission& submission, const std::uint32_t* guest, std::size_t words) {
+        submission.commands.clear();
+        std::size_t budget = std::size_t{1} << 26u;
+        copySegment(submission, guest, words, budget);
+    }
+
+    static bool copySegment(Submission& submission, const std::uint32_t* guest, std::size_t words, std::size_t& budget) {
+        require(words <= budget, "command buffer jumps exceed the copy limit (a jump loop?)");
+        budget -= words;
+        for (std::size_t cursor = 0; cursor < words;) {
+            const auto header = guest[cursor];
+            if (Pm4::FillerPacket(header)) { submission.commands.push_back(header); ++cursor; continue; }
+            const auto count = (header & 0xc0000000u) == 0xc0000000u ? Pm4::PacketWords(header) : words - cursor;
+            if ((header & 0xc0000000u) != 0xc0000000u || count > words - cursor) {
+                submission.commands.insert(submission.commands.end(), guest + cursor, guest + words);
+                return false;
+            }
+            const auto opcode = (header >> 8u) & 0xffu;
+            if (opcode == 0x3fu) {
+                require(count == 4, "invalid INDIRECT_BUFFER size");
+                const auto* target = reinterpret_cast<const std::uint32_t*>(static_cast<std::uintptr_t>(guest[cursor + 1] & ~3u) | (static_cast<std::uintptr_t>(guest[cursor + 2] & 0xffffu) << 32u));
+                const std::size_t targetWords = guest[cursor + 3] & 0xfffffu;
+                const bool chain = (guest[cursor + 3] & (1u << 20u)) != 0;
+                GuestMemory::CheckRange(target, targetWords * sizeof(std::uint32_t), alignof(std::uint32_t));
+                if (copySegment(submission, target, targetWords, budget)) return true;
+                if (chain) return false;
+                cursor += count;
+                continue;
+            }
+            submission.commands.insert(submission.commands.end(), guest + cursor, guest + cursor + count);
+            cursor += count;
+            if (opcode == 0x59u) {
+                submission.rewindTail = guest + cursor;
+                submission.rewindWords = words - cursor;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    void waitForFlipRoom(const Submission& submission) {
+        for (std::size_t cursor = 0; cursor < submission.commands.size(); cursor += Pm4::PacketWords(submission.commands[cursor])) {
+            if (submission.commands[cursor] != FlipPacketHeader) continue;
+            std::shared_ptr<IVideoOutput> output;
+            {
+                std::lock_guard lock(mutex);
+                const auto found = outputs.find(submission.commands[cursor + 1]);
+                require(found != outputs.end(), "flip references an unregistered video output");
+                output = found->second;
+            }
+            output->WaitForFlipRoom();
+        }
+    }
+
+    void reserveOutputs(Submission& submission) {
+        for (std::size_t cursor = 0; cursor < submission.commands.size();) {
+            const auto* words = submission.commands.data() + cursor;
+            if (words[0] == RenderingWaitPacketHeader) {
+                const auto output = outputs.find(words[1]);
+                require(output != outputs.end(), "rendering wait references an unregistered video output");
+                auto wait = output->second->CaptureRenderingWait(words[2]);
+                require(wait != nullptr, "video output returned a null rendering wait");
+                submission.renderingWaits.emplace(cursor, std::move(wait));
+            }
+            if (words[0] == FlipPacketHeader) {
+                const auto output = outputs.find(words[1]);
+                require(output != outputs.end(), "flip references an unregistered video output");
+                const FlipInfo info{words[1], std::bit_cast<std::int32_t>(words[2]), words[3], std::bit_cast<std::int64_t>(static_cast<std::uint64_t>(words[4]) | (static_cast<std::uint64_t>(words[5]) << 32u))};
+                auto request = output->second->Reserve(info);
+                require(request != nullptr, "video output returned a null flip reservation");
+                submission.flips.emplace(cursor, std::move(request));
+            }
+            cursor += Pm4::PacketWords(words[0]);
+        }
+    }
+
+    void executeRewindTail(const Submission& stalled) {
+        std::atomic_ref<std::uint32_t> control(*const_cast<std::uint32_t*>(stalled.rewindTail - 1));
+        while ((control.load(std::memory_order_acquire) & 0x80000000u) == 0) {
+            CheckFailure();
+            checkStopping();
+            PollSleep();
+        }
+        Submission tail{};
+        tail.queue = stalled.queue;
+        copyCommands(tail, stalled.rewindTail, stalled.rewindWords);
+        validate(tail.commands, tail.queue, stalled.rewindTail);
+        waitForFlipRoom(tail);
+        {
+            std::lock_guard lock(mutex);
+            rethrowFailure();
+            checkStopping();
+            reserveOutputs(tail);
+            tail.shaders = shaders;
+            tail.serial = stalled.serial;
+            tail.received = ++eventSerial;
+        }
+        execute(tail);
+    }
+
     void Submit(const Packet* packet, std::uint32_t queue) {
         CheckFailure();
         require(queue == 0 || (queue >= 0x20 && queue < 0x58), "unsupported compute queue");
@@ -538,10 +640,11 @@ public:
         if (descriptor.dw_num != 0) {
             require(descriptor.dw_num <= std::numeric_limits<std::size_t>::max() / sizeof(std::uint32_t), "command size overflow");
             GuestMemory::CheckRange(descriptor.addr, static_cast<std::size_t>(descriptor.dw_num) * sizeof(std::uint32_t), alignof(std::uint32_t));
-            submission.commands.assign(descriptor.addr, descriptor.addr + descriptor.dw_num);
+            copyCommands(submission, descriptor.addr, descriptor.dw_num);
         }
         const auto copied = profile ? std::chrono::steady_clock::now() : start;
         validate(submission.commands, queue, descriptor.addr);
+        waitForFlipRoom(submission);
         static const bool trace = std::getenv("APS5_TRACE_GPU") != nullptr;
         if (trace) std::fprintf(stderr, "[gpu] %.1f submit queue=0x%x dwords=%zu at %p\n", TraceMs(), queue, submission.commands.size(), static_cast<const void*>(descriptor.addr));
         const auto validated = profile ? std::chrono::steady_clock::now() : start;
@@ -550,25 +653,7 @@ public:
             rethrowFailure();
             checkStopping();
             require(accepted != std::numeric_limits<std::uint64_t>::max(), "submission serial overflow");
-            for (std::size_t cursor = 0; cursor < submission.commands.size();) {
-                const auto* words = submission.commands.data() + cursor;
-                if (words[0] == RenderingWaitPacketHeader) {
-                    const auto output = outputs.find(words[1]);
-                    require(output != outputs.end(), "rendering wait references an unregistered video output");
-                    auto wait = output->second->CaptureRenderingWait(words[2]);
-                    require(wait != nullptr, "video output returned a null rendering wait");
-                    submission.renderingWaits.emplace(cursor, std::move(wait));
-                }
-                if (words[0] == FlipPacketHeader) {
-                    const auto output = outputs.find(words[1]);
-                    require(output != outputs.end(), "flip references an unregistered video output");
-                    const FlipInfo info{words[1], std::bit_cast<std::int32_t>(words[2]), words[3], std::bit_cast<std::int64_t>(static_cast<std::uint64_t>(words[4]) | (static_cast<std::uint64_t>(words[5]) << 32u))};
-                    auto request = output->second->Reserve(info);
-                    require(request != nullptr, "video output returned a null flip reservation");
-                    submission.flips.emplace(cursor, std::move(request));
-                }
-                cursor += Pm4::PacketWords(words[0]);
-            }
+            reserveOutputs(submission);
             submission.shaders = shaders;
             submission.serial = accepted + 1;
             // Every CPU store the game made before this call precedes the stamp; labels recorded
@@ -3119,7 +3204,7 @@ private:
         for (std::uint32_t i = 0; i < userCount; ++i) {
             userData.push_back(readRegister(queue.shader, 0x240 + i));
         }
-        const auto compute = Graphics::DecodeComputeStageInfo(queue.shader);
+        auto compute = Graphics::DecodeComputeStageInfo(queue.shader);
         const std::array<ShaderRecompiler::MemoryRegion, 2> memory{{{snapshot.codeAddress, std::as_bytes(std::span(snapshot.code))}, {snapshot.headerAddress, snapshot.header}}};
         // The GpuMutex is only taken to create the device: taking it just to copy the pointer made
         // every dispatch wait behind another queue's whole device phase before its lock-free prologue.
@@ -3151,6 +3236,12 @@ private:
         if (indirectArguments == 0 && copyBuffer(queue, submission.queue, packet, std::span(snapshot.code).subspan(codeOffset), userData, compute, localDevice, address)) {
             pendingDispatchPhases().outcome = DispatchOutcome::CopyHle;
             return;
+        }
+        if (indirectArguments == 0 && (packet[4] & 0x20u) != 0) {
+            const std::array<std::uint32_t, 3> threads{packet[1], packet[2], packet[3]};
+            for (std::uint32_t axis = 0; axis < 3; ++axis) {
+                if (threads[axis] % compute.numThreads[axis] != 0) compute.partialThreads = threads;
+            }
         }
         ShaderRecompiler::RecompileRequest request{
             {ShaderRecompiler::ShaderStage::Compute, address, std::span(snapshot.code).subspan(codeOffset), snapshot.headerAddress, snapshot.header},
@@ -3216,6 +3307,7 @@ private:
         };
         mix(address);
         mix(packet[4] & 0x8000u);
+        for (const auto threads : compute.partialThreads) mix(threads);
         for (const auto word : userData) mix(word);
         // Only the shader registers the request reads (thread counts and RSRC1/2; the program
         // address is `address`): on queue 0 the bank also holds the graphics stages' registers,
@@ -3889,19 +3981,35 @@ private:
         if (!drawParameters.indirect && !drawParameters.indexed && (drawParameters.indexCount == 0 || drawParameters.instanceCount == 0)) return DrawVerdict::Nothing;
         static const bool traceIndirect = std::getenv("APS5_TRACE_INDIRECT_DRAWS") != nullptr;
         if (traceIndirect && drawParameters.indirect) std::fprintf(stderr, "[draw] indirect packet %s args 0x%llx count %u reached\n", Pm4::Name(packet[0]).c_str(), static_cast<unsigned long long>(drawParameters.indirect->arguments), drawParameters.indirect->count);
-        // Depth/stencil-only passes (no color writes, no pixel shader) have no effect without depth
-        // targets, which are not emulated.
         {
             const auto targetMask = queue.context.find(0x8e);
             const auto shaderMask = queue.context.find(0x8f);
             const bool colorWrites = targetMask != queue.context.end() && shaderMask != queue.context.end() && (targetMask->second & shaderMask->second) != 0;
-            if (!colorWrites && !queue.shader.contains(0x8)) return DrawVerdict::Nothing;
+            if (!colorWrites && !queue.shader.contains(0x8)) {
+                const auto word = [&](std::uint32_t offset) { const auto it = queue.context.find(offset); return it == queue.context.end() ? 0u : it->second; };
+                if ((word(0x200) & 3u) == 0 || ((word(0x010) & 3u) == 0 && (word(0x011) & 1u) == 0)) return DrawVerdict::Nothing;
+                rejected = "AGC graphics: depth/stencil-only draws without a pixel shader are not implemented";
+                return DrawVerdict::Rejected;
+            }
         }
         if (drawParameters.indexed) {
             const auto restart = queue.userConfig.find(0x24b);
             if (restart != queue.userConfig.end() && restart->second != 0) {
-                rejected = "AGC graphics: primitive restart (GE_MULTI_PRIM_IB_RESET_EN) is unsupported for indexed draws";
-                return DrawVerdict::Rejected;
+                const auto resetIndex = queue.context.find(0x103);
+                const auto primitive = queue.userConfig.find(0x242);
+                const std::uint32_t allOnes = drawParameters.indexSize == 2 ? 0xffffu : 0xffffffffu;
+                const auto type = primitive == queue.userConfig.end() ? 0u : primitive->second & 0x3fu;
+                const bool strip = type == 3 || type == 5 || type == 6;
+                const bool list = type == 1 || type == 2 || type == 4;
+                const auto restartDevice = device.load();
+                if (!strip && !(list && restartDevice != nullptr && restartDevice->PrimitiveListRestart())) {
+                    rejected = "AGC graphics: primitive restart is only supported for strips, and for lists with VK_EXT_primitive_topology_list_restart";
+                    return DrawVerdict::Rejected;
+                }
+                if (resetIndex == queue.context.end() || (resetIndex->second & allOnes) != allOnes) {
+                    rejected = "AGC graphics: primitive restart index other than all ones is unsupported";
+                    return DrawVerdict::Rejected;
+                }
             }
         }
         if (DrawPrecheck()) {
@@ -4057,7 +4165,7 @@ private:
             }
             append(0x008, 1, Stage::Fragment, 0x00b, 0x00c, Role::Fragment);
             programs.back().firstUserSgpr = 0;
-            product->pixel = Graphics::DecodePixelStageInfo(queue.context, graphics.hasColorTarget, graphics.color.componentMapping);
+            product->pixel = Graphics::DecodePixelStageInfo(queue.context, Graphics::ExportMappings(graphics));
             return product;
         };
         if (decode == nullptr || VerifyDrawRecipe()) {
@@ -5042,6 +5150,23 @@ private:
         return true;
     }
 
+    void dumpSampleCounters(std::uint64_t address) {
+        std::uint64_t samples = 0;
+        {
+            GuestMemory::TagGpuLockSite(GuestMemory::GpuLockSite::Flush);
+            std::lock_guard gpuLock(GuestMemory::GpuMutex());
+            auto* recorder = Graphics::Recorder::Active();
+            require(recorder != nullptr, "occlusion counters without the command recorder are not implemented");
+            recorder->CountSamples();
+            samples = Graphics::Recorder::SamplesPassed();
+        }
+        constexpr std::uint64_t ready = 1ull << 63u;
+        for (std::uint64_t db = 0; db < 16; ++db) {
+            const std::uint64_t value = ready | (db == 0 ? samples : 0u);
+            GuestMemory::Write(address + db * 16u, std::as_bytes(std::span(&value, 1)), 8);
+        }
+    }
+
     // Before a packet's CPU read of guest memory outside any lock (the group counts of a
     // DISPATCH_INDIRECT resolved on the CPU): a label this queue still has queued may write those
     // bytes and the flush hook only knows recorded stores, so the queued labels are recorded first.
@@ -5886,11 +6011,12 @@ private:
             // draw's preparation reads goes through the flush hook. Debug aid: APS5_DRAW_DRAIN=1 restores.
             static const bool drawDrain = std::getenv("APS5_DRAW_DRAIN") != nullptr;
             const bool drawPacket = Pm4::DrawOpcode(opcode);
+            const bool sampleDump = opcode == 0x46 && (packet[1] & 0x3fu) == 0x39u;
             // Flips no longer drain either: the frame's batches are submitted and the presenter's blit
             // follows them on the same queue (see Driver::Present). Debug aid: APS5_SYNC_FLIP=1 restores.
             static const bool syncFlip = std::getenv("APS5_SYNC_FLIP") != nullptr;
             const bool drains = drainAll ? ((Pm4::AccessesMemory(header) && opcode != 0x16) || opcode == 0x42 || opcode == 0x46 || opcode == 0x58 || header == FlipPacketHeader)
-                                         : (!wroteOnGpu && !orderedAlready && (opcode == 0x49 || opcode == 0x37 || opcode == 0x40 || opcode == 0x50 || opcode == 0x83 || (drawPacket && drawDrain) || (header == FlipPacketHeader && syncFlip)));
+                                         : (!wroteOnGpu && !orderedAlready && (opcode == 0x49 || opcode == 0x37 || opcode == 0x40 || opcode == 0x50 || opcode == 0x83 || sampleDump || (drawPacket && drawDrain) || (header == FlipPacketHeader && syncFlip)));
             if (drains) {
                 // The GPU wait happens without the mutex: the batches are submitted under it, the
                 // timeline value is waited for outside (the other workers keep recording), then the
@@ -6071,6 +6197,8 @@ private:
                     }
                 }); });
                 finishDrawPacket(drawn);
+            } else if (sampleDump) {
+                dumpSampleCounters(packet[2] | (static_cast<std::uint64_t>(packet[3]) << 32u));
             } else if (opcode != 0x42 && opcode != 0x46 && opcode != 0x58) {
                 if (!wroteOnGpu) Pm4::Execute(packet, queue);
             }
@@ -6090,7 +6218,7 @@ private:
         static const bool submitAtEnd = std::getenv("APS5_SUBMIT_AT_END") != nullptr;
         if (!deferredLabels().labels.empty() || Graphics::Recorder::PendingLabelSince().has_value() || Graphics::Recorder::RecordedWorkSinceSubmit() != 0) {
             auto& costs = submissionCosts(submission.queue);
-            if (!submitAtEnd && submission.queue == 0 && workerQueued() != nullptr && workerQueued()->load(std::memory_order_acquire) != 0) {
+            if (!submitAtEnd && submission.rewindTail == nullptr && submission.queue == 0 && workerQueued() != nullptr && workerQueued()->load(std::memory_order_acquire) != 0) {
                 ++costs.endSkipped;
                 return;
             }
@@ -6102,6 +6230,7 @@ private:
             recordDeferredLabels(localDevice.get(), submission.queue);
             if (localDevice != nullptr) localDevice->SubmitRecorded(submission.queue == 0);
         }
+        if (submission.rewindTail != nullptr) executeRewindTail(submission);
     }
 
     // The calling worker's pending count (QueueWorker::queued), set by run(); null off a worker.

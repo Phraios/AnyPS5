@@ -89,7 +89,14 @@ void stateTests() {
     queue.context[0x1b4] = 2;
     (void)AgcDriver::Graphics::DecodeState(queue);
     Require(AgcDriver::Graphics::DrawRejection(queue, false).empty(), "primitive restart rejected a non-indexed draw");
-    Require(AgcDriver::Graphics::DrawRejection(queue, true).find("GE_MULTI_PRIM_IB_RESET_EN") != std::string::npos, "primitive restart was accepted for an indexed draw");
+    queue.userConfig[0x242] = 9;
+    Require(AgcDriver::Graphics::DrawRejection(queue, true).find("point, line and triangle") != std::string::npos, "primitive restart was accepted for patches");
+    queue.userConfig[0x242] = 6;
+    queue.context[0x103] = 0xffffffffu;
+    Require(AgcDriver::Graphics::DrawRejection(queue, true).empty(), "primitive restart was rejected for an indexed strip");
+    Require(AgcDriver::Graphics::DecodeState(queue).primitiveRestart, "primitive restart was not decoded for a strip");
+    queue.context[0x103] = 5;
+    Require(AgcDriver::Graphics::DrawRejection(queue, true).find("all ones") != std::string::npos, "a restart index other than all ones was accepted");
     queue = makeState();
     queue.userConfig.erase(0x24b);
     queue.context[0x2a5] = 0;
@@ -100,7 +107,8 @@ void stateTests() {
     state = AgcDriver::Graphics::DecodeState(queue);
     Require(state.scissor.offset.x == 3 && state.scissor.offset.y == 1 && state.scissor.extent.width == 29 && state.scissor.extent.height == 2, "scissor intersection changed");
     queue.context[0x31c] |= 0x10000000;
-    expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "DCC");
+    queue.context[0x325] = 0x1234;
+    Require(AgcDriver::Graphics::DecodeState(queue).color.dccAddress == 0x123400, "DCC key address decode changed");
     queue = makeState();
     queue.context.erase(0x3b8);
     expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "missing register");
@@ -109,10 +117,11 @@ void stateTests() {
     expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "unsupported color tile mode");
     queue = makeState();
     queue.context[0x3b0] = (62u << 14u) | 3u;
-    expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "pitch");
+    Require(AgcDriver::Graphics::DecodeState(queue).color.bytes == 64u * 4u * 4u, "padded linear pitch changed");
     queue = makeState();
     queue.context[0x8e] = 0xff;
-    expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "target zero");
+    queue.context[0x8f] = 0xff;
+    expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "color export format 0");
     queue = makeState();
     queue.context[0x200] = 2;
     expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "depth");
@@ -128,7 +137,7 @@ void stateTests() {
     queue.context[0x1b4] = 2;
     state = AgcDriver::Graphics::DecodeState(queue);
     Require(AgcDriver::Graphics::DrawRejection(queue, true).empty(), "precheck rejected the reference state");
-    static_cast<void>(AgcDriver::Graphics::DecodePixelStageInfo(queue.context, state.hasColorTarget, state.color.componentMapping));
+    static_cast<void>(AgcDriver::Graphics::DecodePixelStageInfo(queue.context, AgcDriver::Graphics::ExportMappings(state)));
     AgcDriver::Graphics::RegisterReadLog() = nullptr;
     Require(!log.empty(), "the register facade recorded nothing");
     for (const auto read : log) Require(AgcDriver::Graphics::DrawKeyCovers(read), "DrawKeyRegisters lacks a register the decoders read: " + std::string(AgcDriver::Graphics::RegisterBankName(read.bank)) + " " + std::to_string(read.offset));
@@ -233,6 +242,66 @@ void DisabledColorTests() {
     expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "missing register");
 }
 
+void DepthStencilTests() {
+    auto queue = makeState();
+    queue.context[0x000] = 0;
+    queue.context[0x002] = 0;
+    queue.context[0x007] = (1u << 16u) | 3u;
+    queue.context[0x00a] = 7;
+    queue.context[0x00b] = 0;
+    queue.context[0x010] = 0x22900983;
+    queue.context[0x011] = 0x20000181;
+    for (const auto offset : {0x012u, 0x014u}) queue.context[offset] = 0x100;
+    for (const auto offset : {0x013u, 0x015u}) queue.context[offset] = 0x200;
+    queue.context[0x10b] = 0x00050050;
+    queue.context[0x10c] = 0x01ffff01;
+    queue.context[0x10d] = 0x01000001;
+    queue.context[0x200] = 0x00700711;
+    std::vector<AgcDriver::Graphics::RegisterRead> log;
+    AgcDriver::Graphics::RegisterReadLog() = &log;
+    auto state = AgcDriver::Graphics::DecodeState(queue);
+    AgcDriver::Graphics::RegisterReadLog() = nullptr;
+    for (const auto read : log) Require(AgcDriver::Graphics::DrawKeyCovers(read), "DrawKeyRegisters lacks a depth register the decoder reads: " + std::to_string(read.offset));
+    queue.context[0x1b3] = 2;
+    queue.context[0x1b4] = 2;
+    const auto rejection = AgcDriver::Graphics::DrawRejection(queue, false);
+    Require(rejection.empty(), "precheck rejected a stencil draw with a surface: " + rejection);
+    Require(state.depth && state.depth->address == 0x10000 && state.depth->stencilAddress == 0x20000 && state.depth->format == VK_FORMAT_D32_SFLOAT_S8_UINT && state.depth->clearStencil == 7, "depth surface decode changed");
+    Require(state.renderExtent.width == 4 && state.renderExtent.height == 2, "render extent ignores the depth surface");
+    Require(!state.depthTest && !state.depthWrite && state.stencilTest, "depth/stencil enables changed");
+    const auto& front = state.stencilFront;
+    Require(front.compareOp == VK_COMPARE_OP_ALWAYS && front.passOp == VK_STENCIL_OP_INCREMENT_AND_CLAMP && front.failOp == VK_STENCIL_OP_KEEP && front.reference == 1 && front.writeMask == 0xff, "stencil mask pass changed");
+    Require(std::memcmp(&state.stencilBack, &front, sizeof(front)) == 0, "back faces without BACKFACE_ENABLE must use the front state");
+    queue.context[0x10b] = 0;
+    queue.context[0x10c] = 0x01ffff02;
+    queue.context[0x200] = 0x00200211;
+    state = AgcDriver::Graphics::DecodeState(queue);
+    Require(state.stencilFront.compareOp == VK_COMPARE_OP_EQUAL && state.stencilFront.reference == 2 && state.stencilFront.passOp == VK_STENCIL_OP_KEEP, "stencil content pass changed");
+    queue.context[0x10b] = 0x00030030;
+    queue.context[0x10c] = 0x01ffff00;
+    queue.context[0x200] = 0x00700771;
+    state = AgcDriver::Graphics::DecodeState(queue);
+    Require(state.stencilFront.passOp == VK_STENCIL_OP_REPLACE && state.stencilFront.reference == 0 && std::memcmp(&state.stencilBack, &state.stencilFront, sizeof(state.stencilFront)) == 0, "stencil clear pass changed");
+    queue.context[0x200] = 0x007007f1;
+    state = AgcDriver::Graphics::DecodeState(queue);
+    Require(state.stencilBack.compareOp == VK_COMPARE_OP_ALWAYS && state.stencilBack.passOp == VK_STENCIL_OP_KEEP && state.stencilBack.writeMask == 0 && state.stencilBack.reference == 1, "back-face stencil state changed");
+    queue.context[0x10b] = 0x40;
+    queue.context[0x10c] = 0x05ffff02;
+    queue.context[0x200] = 0x00200211;
+    expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "stencil replacement");
+    queue.context[0x10b] = 0x50;
+    queue.context[0x200] = 0x00700711;
+    expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "stencil add/subtract");
+    queue.context[0x10b] = 0;
+    queue.context[0x000] = 1;
+    expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "DB_RENDER_CONTROL");
+    queue = makeState();
+    queue.context[0x31b] = 1u << 26u;
+    expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "mip exceeds");
+    queue.context[0x31b] = 1u << 13u;
+    expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "array views");
+}
+
 void DepthClipTests() {
     auto queue = makeState();
     const auto direct = AgcDriver::Graphics::DecodeState(queue);
@@ -261,7 +330,7 @@ void DepthClipTests() {
     expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "inverted viewport depth clamp");
     queue.context[0xb4] = 0;
     for (std::uint32_t bit = 0; bit < 32; ++bit) {
-        if (bit == 19) continue;
+        if (bit == 19 || bit == 26 || bit == 27) continue;
         queue.context[0x204] = 1u << bit;
         expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "PA_CL_CLIP_CNTL");
     }
@@ -592,6 +661,17 @@ void expectSingleFailure(const ShaderRecompiler::DescriptorBinding& binding, std
     expectResourceFailure(vertex, fragment, reason);
 }
 
+void expectSingleAccepted(const ShaderRecompiler::DescriptorBinding& binding, std::string_view what) {
+    ShaderRecompiler::RecompileResult vertex;
+    ShaderRecompiler::RecompileResult fragment;
+    vertex.bindings.push_back(binding);
+    mock = MockVulkan{};
+    const auto context = mockContext();
+    const auto color = AgcDriver::Graphics::DecodeState(makeState()).color;
+    { AgcDriver::Graphics::ShaderResources resources(context, vertex, fragment, color, 0, 0); }
+    Require(mock.live == 0, std::string(what) + " leaked Vulkan objects");
+}
+
 void pushConstantTests() {
     ShaderRecompiler::RecompileResult vertex;
     ShaderRecompiler::RecompileResult fragment;
@@ -716,9 +796,9 @@ void resourceTests() {
         mutate(binding);
         return binding;
     };
-    expectSingleFailure(changed([](auto& binding) { binding.role = Role::GuestImages; binding.kind = Kind::SampledImage; }), "sampled and storage image resources are not implemented");
-    expectSingleFailure(changed([](auto& binding) { binding.role = Role::GuestImages; binding.kind = Kind::StorageImage; }), "sampled and storage image resources are not implemented");
-    expectSingleFailure(changed([](auto& binding) { binding.role = Role::GuestSamplers; binding.kind = Kind::Sampler; }), "sampled and storage image resources are not implemented");
+    expectSingleFailure(changed([](auto& binding) { binding.role = Role::GuestImages; binding.kind = Kind::SampledImage; }), "guest texture descriptor must contain 8 dwords");
+    expectSingleFailure(changed([](auto& binding) { binding.role = Role::GuestImages; binding.kind = Kind::StorageImage; }), "guest storage image descriptors must contain 8 dwords");
+    expectSingleFailure(changed([](auto& binding) { binding.role = Role::GuestSamplers; binding.kind = Kind::Sampler; }), "shader sampler descriptors exceed per-stage limits");
     expectSingleFailure(changed([](auto& binding) { binding.role = Role::Gds; binding.guestDescriptor.clear(); }), "unsupported descriptor role Gds");
     expectSingleFailure(changed([](auto& binding) { binding.role = Role::BdaPagetable; binding.guestDescriptor.clear(); }), "BDA table and fault descriptors");
     expectSingleFailure(changed([](auto& binding) { binding.role = Role::FaultBuffer; binding.guestDescriptor.clear(); }), "BDA table and fault descriptors");
@@ -733,15 +813,13 @@ void resourceTests() {
     expectSingleFailure(changed([](auto& binding) { binding.role = Role::ShaderData; binding.count = 2; binding.guestDescriptor = {1, 2}; }), "must not be arrays");
     expectSingleFailure(changed([](auto& binding) { binding.role = Role::ShaderData; binding.guestDescriptor.clear(); }), "empty shader data descriptor");
     expectSingleFailure(changed([](auto& binding) { binding.role = Role::FlattenedSrt; binding.guestDescriptor.clear(); }), "empty shader data descriptor");
-    expectSingleFailure(changed([](auto& binding) { binding.guestDescriptor[0] = 0; binding.guestDescriptor[1] = 0; }), "null shader buffer descriptor address");
-    expectSingleFailure(changed([](auto& binding) { binding.guestDescriptor[2] = 0; }), "empty shader buffer descriptor");
     expectSingleFailure(changed([](auto& binding) { binding.guestDescriptor[1] |= 0x40000000u; }), "reserved bits");
     expectSingleFailure(changed([](auto& binding) { binding.guestDescriptor[3] |= 0x40000000u; }), "unsupported type");
     expectSingleFailure(changed([](auto& binding) { binding.guestDescriptor[1] |= 0x3fffu << 16u; binding.guestDescriptor[2] = 0xffffffffu; }), "descriptor range limit");
     expectSingleFailure(changed([](auto& binding) { binding.guestDescriptor[2] = 8192; }), "descriptor range limit");
-    expectSingleFailure(changed([](auto& binding) { binding.guestDescriptor = vsharp(reinterpret_cast<const void*>(0x1000), 8); }), "not readable");
+    expectSingleAccepted(changed([](auto& binding) { binding.guestDescriptor = vsharp(reinterpret_cast<const void*>(0x1000), 8); }), "an unmapped V#");
     expectSingleFailure(changed([&](auto& binding) { binding.guestDescriptor = vsharp(reinterpret_cast<const void*>(state.color.address), 64); }), "aliases the render target");
-    expectSingleFailure(changed([](auto& binding) { binding.count = 3; binding.guestDescriptor = join(join(vsharp(guestFirst.data(), 16), vsharp(guestSecond.data(), 32)), vsharp(reinterpret_cast<const void*>(0x1000), 8)); }), "not readable");
+    expectSingleAccepted(changed([](auto& binding) { binding.count = 3; binding.guestDescriptor = join(join(vsharp(guestFirst.data(), 16), vsharp(guestSecond.data(), 32)), vsharp(reinterpret_cast<const void*>(0x1000), 8)); }), "an unmapped V# element");
     expectSingleFailure(changed([&](auto& binding) { binding.count = 2; binding.guestDescriptor = join(vsharp(guestFirst.data(), 16), vsharp(reinterpret_cast<const void*>(state.color.address), 64)); }), "aliases the render target");
     expectSingleFailure(changed([](auto& binding) { binding.count = 17; binding.guestDescriptor.assign(68, 0); }), "per-stage limits");
     {
@@ -963,7 +1041,8 @@ void rectListTests() {
     expectFailure([&] { static_cast<void>(BuildRectListShaders(vertex, fragment, target)); }, "per-vertex interpolation");
     fragment.fragmentParameters[0].perVertex = false;
     vertex.parameterExports.clear();
-    expectFailure([&] { static_cast<void>(BuildRectListShaders(vertex, fragment, target)); }, "no vertex export");
+    auto unexported = BuildRectListShaders(vertex, fragment, target);
+    Require(!unexported.control.spirv.empty() && !unexported.evaluation.spirv.empty(), "rect-list shaders with an unexported parameter are empty");
     fragment.fragmentParameters.clear();
     target.tessellation->maxPatchSize = 3;
     expectFailure([&] { static_cast<void>(BuildRectListShaders(vertex, fragment, target)); }, "device limits");
@@ -1143,6 +1222,7 @@ void validationTests() {
 }
 
 int main() {
+    _putenv_s("APS5_PIN_WAIT_MS", "200");
     try {
         {
             const AgcDriver::Graphics::Context context{};
@@ -1168,6 +1248,7 @@ int main() {
         stateTests();
         hardwareScreenOffsetTests();
         DepthClipTests();
+        DepthStencilTests();
         DisabledColorTests();
         ShaderStageTests();
         InitialContextTests();
@@ -1178,6 +1259,7 @@ int main() {
         mock = MockVulkan{};
         auto bdaContext = mockContext();
         bdaContext.bufferDeviceAddress = true;
+        bdaContext.limits.maxStorageBufferRange = 1u << 27;
         RunBdaResourceTests(bdaContext, {
             [](VkBuffer buffer) -> std::span<std::byte> { return mock.memories.at(mock.bufferMemory.at(buffer)); },
             [](std::uint32_t binding) {
@@ -1185,6 +1267,11 @@ int main() {
                     if (it->binding == binding) return it->buffers.at(0);
                 }
                 throw std::runtime_error("missing BDA test descriptor");
+            },
+            [](VkDeviceAddress address) {
+                const auto offset = address - 0x100000000000ULL;
+                const auto buffer = reinterpret_cast<VkBuffer>(offset / 0x10000);
+                return std::span<std::byte>(mock.memories.at(mock.bufferMemory.at(buffer))).subspan(offset % 0x10000);
             }
         });
         Require(mock.live == 0, "BDA resources leaked Vulkan objects");
