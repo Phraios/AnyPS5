@@ -51,6 +51,7 @@ private:
     IrU64 readU64(const RdnaOperand& operand);
     IrF32 readF16LaneAsF32(const RdnaOperand& operand, bool highLane, bool packed = false);
     IrF32 readF16AsF32(const RdnaOperand& operand);
+    IrU32 readF16SourceBits(const RdnaOperand& operand);
     IrF32 readMixF32(const RdnaOperand& operand);
     IrU32 readU16LaneRaw(const RdnaOperand& operand, bool highLane);
     IrU32 readU16LaneAsU32(const RdnaOperand& operand, bool highLane, bool signExtend);
@@ -184,6 +185,7 @@ private:
     bool vBfeU32(const RdnaInstruction& inst, bool sign);
     bool vBfiB32(const RdnaInstruction& inst);
     bool sBitcmpB32(const RdnaInstruction& inst, bool expected);
+    bool sBitcmpB64(const RdnaInstruction& inst, bool expected);
     bool vAlignbitB32(const RdnaInstruction& inst);
     bool vAlignbyteB32(const RdnaInstruction& inst);
     bool vLshlAddU32(const RdnaInstruction& inst);

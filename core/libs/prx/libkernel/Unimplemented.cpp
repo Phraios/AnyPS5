@@ -5,11 +5,6 @@
 
 extern "C" {
 
-int APS5_VABI rename_nid_postfix() {
- NotImplemented_nid_no_patch(__func__);
- return 0;
-}
-
 int APS5_VABI sceCoredumpWriteUserData() {
  NotImplemented_nid_no_patch(__func__);
  return 0;
@@ -31,11 +26,6 @@ int APS5_VABI sceKernelAprResolveFilepathsWithPrefixToIdsAndFileSizesForEach() {
 }
 
 int APS5_VABI sceKernelAprResolveFilepathsWithPrefixToIdsForEach() {
- NotImplemented_nid_no_patch(__func__);
- return 0;
-}
-
-int APS5_VABI sceKernelFtruncate() {
  NotImplemented_nid_no_patch(__func__);
  return 0;
 }

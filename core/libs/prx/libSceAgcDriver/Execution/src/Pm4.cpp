@@ -644,7 +644,9 @@ DrawParameters ResolveDraw(std::span<const std::uint32_t> packet, const QueueSta
     require(bytes <= std::numeric_limits<std::size_t>::max(), "index range size overflow");
     GuestMemory::CheckRange(reinterpret_cast<const void*>(address), static_cast<std::size_t>(bytes), indexSize);
     APS5_LOG_OUT_DEBUG("ResolveDraw context targetMask=0x%x shaderMask=0x%x indexCount=%u indexType=%u instances=%u", queue.context.contains(0x8e) ? queue.context.at(0x8e) : 0u, queue.context.contains(0x8f) ? queue.context.at(0x8f) : 0u, count, queue.indexType, queue.instanceCount);
-    return {address, count, indexSize, queue.instanceCount, packet.back()};
+    const auto indexOffset = queue.userConfig.find(0x24a);
+    require(indexOffset != queue.userConfig.end(), "missing GE_INDX_OFFSET register");
+    return {address, count, indexSize, queue.instanceCount, packet.back(), true, indexOffset->second, 0};
 }
 
 void Execute(std::span<const std::uint32_t> packet, QueueState& queue) {

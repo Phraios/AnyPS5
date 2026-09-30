@@ -196,6 +196,10 @@ void logLookup(const LookupRecord& record) {
 
 std::shared_ptr<StorageTexture> cachedStorageTexture(const Context& context, std::span<const std::uint32_t> words, const GuestTextureResource& resource, std::uint32_t mip, std::uint64_t guestBytes = 0);
 
+bool MetadataMoved(const StorageTexture& image, const GuestTextureResource& resource) {
+    return resource.dccAddress != 0 && image.Descriptor().dccAddress != resource.dccAddress;
+}
+
 // Whether a sampled texture over `resource` can be a view of the surface's cached storage image
 // instead of a CPU snapshot (see cachedTexture): the format has a storage form and is not block
 // compressed, and the surface lives in host-imported memory, where the image uploads and refreshes
@@ -265,10 +269,17 @@ std::shared_ptr<StorageTexture> sampledStorageSource(const Context& context, con
 std::shared_ptr<Texture> cachedTexture(const Context& context, std::span<const std::uint32_t> words, const GuestTextureResource& resource, VkComponentMapping components, std::uint64_t guestBytes = 0) {
     CaptureTrace::Log("sampled-lookup address=%llx width=%u height=%u dcc=%llx", static_cast<unsigned long long>(resource.baseAddress), resource.width, resource.height, static_cast<unsigned long long>(resource.dccAddress));
     if (auto depth = DepthSurfaceTexture(context, words, resource, components)) return depth;
-    if (words.size() >= 4 && ShaderRecompiler::IsDepthBitsTexture(words[1], words[3])) {
+    const auto depthBitsWidth = words.size() >= 4 ? ShaderRecompiler::DepthBitsTextureWidth(words[1], words[3]) : 0u;
+    if (depthBitsWidth == 32u) {
         char text[160];
         std::snprintf(text, sizeof(text), "AGC graphics: 32-bit integer read of the depth-layout texture 0x%llx, which is no depth surface drawn with, is not implemented", static_cast<unsigned long long>(resource.baseAddress));
         throw std::runtime_error(text);
+    }
+    constexpr auto unorm16 = static_cast<std::uint32_t>(ShaderRecompiler::IrBufferFormat::Format16UNorm);
+    if (depthBitsWidth == 16u && resource.format != unorm16) {
+        auto normalized = resource;
+        normalized.format = unorm16;
+        return cachedTexture(context, words, normalized, components, guestBytes);
     }
     static const bool disabled = std::getenv("APS5_NO_TEXTURE_CACHE") != nullptr;
     const bool profile = LookupOutcomes::Profiled();
@@ -287,7 +298,7 @@ std::shared_ptr<Texture> cachedTexture(const Context& context, std::span<const s
     // the GPU supplies the texture by a view of it; anything else needs those results in guest
     // memory first.
     auto source = StorageTexture::FindPending(address, guestBytes);
-    if (source != nullptr && !Texture::CanCopyFrom(*source, resource)) source.reset();
+    if (source != nullptr && (!Texture::CanCopyFrom(*source, resource) || MetadataMoved(*source, resource))) source.reset();
     // Otherwise a surface in host-imported memory is viewed through its cached storage image (made
     // here when there is none): its refresh after a CPU or GPU write is a GPU-direct detile from the
     // import, recorded behind the producer, so no bytes are read or compared on the CPU and nothing
@@ -496,7 +507,12 @@ std::shared_ptr<StorageTexture> cachedStorageTexture(const Context& context, std
     const StorageKey key{context.device, SurfaceKey(context, resource)};
     auto& cache = StorageTextures();
     std::lock_guard lock(cache.mutex);
-    if (auto it = findStorage(cache, key); it != cache.entries.end()) {
+    auto it = findStorage(cache, key);
+    if (it != cache.entries.end() && MetadataMoved(*it->texture, resource)) {
+        evictStorage(cache, it);
+        it = cache.entries.end();
+    }
+    if (it != cache.entries.end()) {
         it->texture->Refresh();
         cache.entries.splice(cache.entries.begin(), cache.entries, it);
         counters.storageHits.fetch_add(1, std::memory_order_relaxed);

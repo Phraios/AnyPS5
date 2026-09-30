@@ -106,6 +106,14 @@ endif()
 
 
 if(BUILD_TESTING)
+    add_executable(buffer_bounds_tests
+        ${CMAKE_CURRENT_SOURCE_DIR}/io/tests/BufferBoundsTests.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/io/src/ByteReader.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/io/src/BufferUtils.cpp
+    )
+    target_include_directories(buffer_bounds_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/io/include)
+    add_test(NAME buffer_bounds COMMAND buffer_bounds_tests)
+
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         add_executable(file_writer_tests
             ${CMAKE_CURRENT_SOURCE_DIR}/io/tests/FileWriterTests.cpp
@@ -157,6 +165,10 @@ if(BUILD_TESTING)
             ${CMAKE_CURRENT_SOURCE_DIR}/relinker/tests/test_linux_load_alignment.py $<TARGET_FILE:relinker>)
         add_test(NAME windows_gui COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/relinker/tests/test_windows_gui.py $<TARGET_FILE:relinker>)
+        add_test(NAME guest_intel_trampolines COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/relinker/tests/test_guest_intel_trampolines.py $<TARGET_FILE:relinker>)
+        add_test(NAME elf_header COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/relinker/tests/test_elf_header.py $<TARGET_FILE:relinker>)
     else()
         message(STATUS "Python3 interpreter not found; skipping Python relinker tests")
     endif()

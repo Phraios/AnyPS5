@@ -576,15 +576,16 @@ int DoMunmap(void* addr, size_t len) {
     Trace("unmap %p+0x%zx", addr, len);
     if (len == 0 || (len & (PS5_PAGE_SIZE - 1)) != 0 || !addr) return SCE_KERNEL_ERROR_EINVAL;
     GuestAllocations::Mutation mutation;
-    mutation.Unmap(addr, len, [&](const void* allocation, bool last) {
+    mutation.Unmap(addr, len, [&](const void* piece, std::size_t pieceBytes, const void* allocation, bool last) {
+        auto* pieceAddress = const_cast<void*>(piece);
         std::lock_guard lock(g_directLock);
-        EraseMappings(reinterpret_cast<std::uintptr_t>(addr), reinterpret_cast<std::uintptr_t>(addr) + len);
+        EraseMappings(reinterpret_cast<std::uintptr_t>(piece), reinterpret_cast<std::uintptr_t>(piece) + pieceBytes);
 #if defined(__linux__)
-        Unmap(addr, len);
+        Unmap(pieceAddress, pieceBytes);
 #else
-        if (KernelArena::Get().Contains(addr, len)) munmap(addr, len);
+        if (KernelArena::Get().Contains(pieceAddress, pieceBytes)) munmap(pieceAddress, pieceBytes);
         else if (last) munmap_release(const_cast<void*>(allocation));
-        else munmap(addr, len);
+        else munmap(pieceAddress, pieceBytes);
 #endif
     });
     RecordProtection(addr, len, -1);

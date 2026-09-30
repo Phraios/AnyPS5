@@ -103,6 +103,10 @@ int APS5_VABI sceAgcUnknownFuseShaderHalves(Shader* fused_result, const Shader* 
     return 0;
 }
 
+int APS5_VABI sceAgcFuseShaderHalves_nid_postfix(Shader* fused_result, const Shader* front, const Shader* back, void* scratch_mem) {
+    return sceAgcUnknownFuseShaderHalves(fused_result, front, back, scratch_mem);
+}
+
 APS5_EXPORT("dolOmWH+huQ", sceAgcUnknownGetFusedShaderSize);
 int APS5_VABI sceAgcUnknownGetFusedShaderSize(SizeAlign* dst, const Shader* front, const Shader* back) {
     if (dst == nullptr || front == nullptr || back == nullptr) APS5_INVALID_ARG_EX;

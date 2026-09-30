@@ -369,12 +369,9 @@ void countCache(std::uint64_t DrawProfile::*counter) {
 // fragment results the key already names (the pipeline key treats them the same way). `memoized`
 // says whether the memo applied, `hit` whether it answered. APS5_NO_VALIDATE_CACHE=1 validates
 // every draw.
-std::set<std::uint32_t> CachedFragmentOutputs(const Context& context, std::span<const CompiledShader> shaders, const State& state, bool& memoized, bool& hit) {
+bool ValidationKey(const Context& context, std::span<const CompiledShader> shaders, const State& state, std::vector<std::uint64_t>& key) {
     using Stage = ShaderRecompiler::ShaderStage;
     static const bool disabled = std::getenv("APS5_NO_VALIDATE_CACHE") != nullptr;
-    memoized = false;
-    hit = false;
-    std::vector<std::uint64_t> key;
     const auto add = [&](auto value) { key.push_back(static_cast<std::uint64_t>(value)); };
     bool keyed = !disabled;
     if (keyed) {
@@ -435,19 +432,47 @@ std::set<std::uint32_t> CachedFragmentOutputs(const Context& context, std::span<
             add(tessellation.outputTopology);
         }
     }
+    return keyed;
+}
+
+std::mutex& validationMutex() {
     static std::mutex mutex;
+    return mutex;
+}
+
+std::map<std::vector<std::uint64_t>, std::string>& validationFailures() {
+    static std::map<std::vector<std::uint64_t>, std::string> failures;
+    return failures;
+}
+
+std::set<std::uint32_t> CachedFragmentOutputs(const Context& context, std::span<const CompiledShader> shaders, const State& state, bool& memoized, bool& hit) {
+    memoized = false;
+    hit = false;
+    std::vector<std::uint64_t> key;
+    const bool keyed = ValidationKey(context, shaders, state, key);
     static std::map<std::vector<std::uint64_t>, std::set<std::uint32_t>> memo;
     if (keyed) {
         memoized = true;
-        std::lock_guard lock(mutex);
+        std::lock_guard lock(validationMutex());
         if (const auto found = memo.find(key); found != memo.end()) {
             hit = true;
             return found->second;
         }
     }
-    auto outputs = ValidateShaders(shaders, state, context.subgroup, context.fragmentShaderBarycentric, context.descriptorIndexing);
+    std::set<std::uint32_t> outputs;
+    try {
+        outputs = ValidateShaders(shaders, state, context.subgroup, context.fragmentShaderBarycentric, context.descriptorIndexing);
+    } catch (const std::exception& error) {
+        if (keyed) {
+            std::lock_guard lock(validationMutex());
+            auto& failures = validationFailures();
+            if (failures.size() >= 1024) failures.clear();
+            failures.emplace(std::move(key), error.what());
+        }
+        throw;
+    }
     if (keyed) {
-        std::lock_guard lock(mutex);
+        std::lock_guard lock(validationMutex());
         // A handful of configurations recur; a runaway key space is dropped wholesale.
         if (memo.size() >= 1024) memo.clear();
         memo.emplace(std::move(key), outputs);
@@ -1236,6 +1261,15 @@ bool RecordDraws() {
     return recordDraws;
 }
 
+}
+
+std::optional<std::string> KnownValidationFailure(const Context& context, std::span<const CompiledShader> shaders, const State& state) {
+    std::vector<std::uint64_t> key;
+    if (!ValidationKey(context, shaders, state, key)) return std::nullopt;
+    std::lock_guard lock(validationMutex());
+    const auto& failures = validationFailures();
+    if (const auto found = failures.find(key); found != failures.end()) return found->second;
+    return std::nullopt;
 }
 
 void Draw(const Context& context, const State& state, const Pm4::DrawParameters& draw, std::span<const CompiledShader> shaders, std::span<const GuestMemorySnapshot> snapshots, std::shared_ptr<const DrawRecipe>* recipeOut) {
