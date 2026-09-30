@@ -174,6 +174,7 @@ struct MeshConfiguration {
     std::uint32_t threadsPerGroup;
     std::uint32_t ldsSizeDwords;
     std::uint32_t provokingVertex;
+    std::uint32_t esgsItemSize = 0;
 };
 
 struct TessellationConfiguration {
@@ -183,6 +184,10 @@ struct TessellationConfiguration {
     std::uint32_t partitioning;
     std::uint32_t outputTopology;
 };
+
+inline constexpr std::uint32_t MeshDrawPushOffsetBytes = 104;
+inline constexpr std::uint32_t MeshDrawPushBytes = 24;
+inline constexpr std::uint32_t MeshIndexBufferUserWord = 4;
 
 struct GraphicsDrawParameters {
     std::uint64_t indexAddress;

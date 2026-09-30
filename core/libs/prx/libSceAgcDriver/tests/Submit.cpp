@@ -4,6 +4,8 @@
 #include "prx/libSceAgcDriver/Submit/include/Dcb.hpp"
 #include "prx/libSceAgcDriver/Submit/include/Acb.hpp"
 #include "prx/libSceAgcDriver/Eq/include/Query.hpp"
+#include "prx/libSceAgcDriver/Eq/include/Event.hpp"
+#include "prx/libkernel/Equeue/Equeue.hpp"
 #include <array>
 #include <cstdio>
 #include <limits>
@@ -11,6 +13,9 @@
 #include <string>
 #include <thread>
 #include <vector>
+
+extern "C" int APS5_VABI sceKernelCreateEqueue(KernelEqueue* eq, const char* name);
+extern "C" int APS5_VABI sceKernelDeleteEqueue(KernelEqueue eq);
 
 static_assert(sizeof(Packet) == 16);
 static_assert(offsetof(Packet, addr) == 0);
@@ -144,6 +149,41 @@ void testSubmissions() {
     AgcDriverWaitIdle_nid_postfix();
 }
 
+void testEndOfPipeInterrupts() {
+    KernelEqueue eq = 0;
+    check(sceKernelCreateEqueue(&eq, "AGC test") == 0, "event queue creation failed");
+    auto owner = EqueuePin_nid_postfix(eq);
+    int graphicsTag = 0;
+    int computeTag = 0;
+    check(sceAgcDriverAddEqEvent(eq, 0, &graphicsTag) == 0, "graphics event registration failed");
+    check(sceAgcDriverAddEqEvent(eq, 0x20, &computeTag) == 0, "compute event registration failed");
+    expectFailure([] { sceAgcDriverAddEqEvent(0, 0, nullptr); });
+    std::array<std::uint32_t, 8> words{0xc0064900, 0, 1u << 24u, 0, 0, 0, 0, 0};
+    Packet packet{words.data(), static_cast<std::uint32_t>(words.size()), 0, {}};
+    check(sceAgcDriverSubmitDcb(&packet) == 0 && sceAgcDriverSubmitDcb(&packet) == 0, "interrupt submit failed");
+    AgcDriverWaitIdle_nid_postfix();
+    std::array<KernelEvent, 2> events{};
+    check(owner->GetTriggeredEvents(events.data(), 2) == 1, "graphics end-of-pipe interrupt was not delivered to its queue only");
+    check(events[0].filter == -14 && events[0].udata == &graphicsTag && events[0].data == 2 && sceAgcDriverGetEqEventType(events.data()) == 0, "graphics end-of-pipe event encoding is wrong");
+    check(owner->GetTriggeredEvents(events.data(), 2) == 0, "delivered interrupt was not cleared");
+    check(sceAgcDriverSubmitAcb(0x20, &packet) == 0, "compute interrupt submit failed");
+    AgcDriverWaitIdle_nid_postfix();
+    check(owner->GetTriggeredEvents(events.data(), 2) == 1 && events[0].udata == &computeTag && sceAgcDriverGetEqEventType(events.data()) == 0x20, "compute end-of-pipe interrupt missing");
+    words[2] = 0;
+    check(sceAgcDriverSubmitDcb(&packet) == 0, "plain release submit failed");
+    AgcDriverWaitIdle_nid_postfix();
+    check(owner->GetTriggeredEvents(events.data(), 2) == 0, "release without INT_SEL raised an interrupt");
+    check(sceAgcDriverDeleteEqEvent(eq, 0) == 0, "graphics event deletion failed");
+    expectFailure([&] { sceAgcDriverDeleteEqEvent(eq, 0); });
+    words[2] = 1u << 24u;
+    check(sceAgcDriverSubmitDcb(&packet) == 0, "interrupt submit after deletion failed");
+    AgcDriverWaitIdle_nid_postfix();
+    check(owner->GetTriggeredEvents(events.data(), 2) == 0, "deleted event still received interrupts");
+    check(sceAgcDriverDeleteEqEvent(eq, 0x20) == 0, "compute event deletion failed");
+    owner.reset();
+    check(sceKernelDeleteEqueue(eq) == 0, "event queue deletion failed");
+}
+
 void testWorkerFailure() {
     std::array<std::uint32_t, 5> words{0xc0031500, 1, 1, 1, 0x41};
     Packet packet{words.data(), static_cast<std::uint32_t>(words.size()), 0, {}};
@@ -168,6 +208,7 @@ int main() {
         testValidation();
         testClearState();
         testSubmissions();
+        testEndOfPipeInterrupts();
         testWorkerFailure();
         check(expectFailure([] { LibcRunShutdown_nid_postfix(); }).find("required shader register") != std::string::npos, "shutdown lost worker failure");
         std::puts("AGC driver submit tests passed");

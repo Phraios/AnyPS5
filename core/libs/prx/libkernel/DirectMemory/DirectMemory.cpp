@@ -1,6 +1,7 @@
 #include "prx/libkernel/DirectMemory/DirectMemory.hpp"
 #include "prx/libc/include/GuestAllocations.hpp"
 #include "prx/libc/include/GuestArena.hpp"
+#include "prx/libc/include/GuestWriteWatch.hpp"
 #include <algorithm>
 #include <cerrno>
 #include <iterator>
@@ -307,6 +308,25 @@ void ValidatePhysicalRange(std::uint64_t phys, std::size_t len) {
     }
 }
 
+#if defined(__linux__)
+void WatchMapping(std::uintptr_t address, std::size_t len) {
+    GuestWriteWatch::GuestWriteWatchRegister_nid_postfix(reinterpret_cast<const void*>(address), len);
+    const auto end = address + len;
+    for (auto added = g_directMappings.lower_bound(address); added != g_directMappings.end() && added->first < end; ++added) {
+        const auto addedPhys = added->second.phys;
+        const auto addedPhysEnd = addedPhys + (added->second.end - added->first);
+        for (const auto& [base, other] : g_directMappings) {
+            if ((base >= address && base < end) || other.backing != added->second.backing) continue;
+            const auto first = std::max(addedPhys, other.phys);
+            const auto last = std::min(addedPhysEnd, other.phys + (other.end - base));
+            if (first >= last) continue;
+            GuestWriteWatch::GuestWriteWatchUnregister_nid_postfix(reinterpret_cast<const void*>(added->first + (first - addedPhys)), last - first);
+            GuestWriteWatch::GuestWriteWatchUnregister_nid_postfix(reinterpret_cast<const void*>(base + (first - other.phys)), last - first);
+        }
+    }
+}
+#endif
+
 void AddMapping(std::uintptr_t address, std::size_t len, std::uint64_t phys, int nativeProt) {
     ValidatePhysicalRange(phys, len);
     EraseMappings(address, address + len);
@@ -322,6 +342,9 @@ void AddMapping(std::uintptr_t address, std::size_t len, std::uint64_t phys, int
         g_directMappings.emplace(address + offset, DirectMapping{address + offset + bytes, phys + offset, page.backing->MemoryType(), page.backing});
         offset += bytes;
     }
+#if defined(__linux__)
+    WatchMapping(address, len);
+#endif
 }
 
 bool RemapFixedIntoRegistered(GuestAllocations::Mutation& mutation, void* addr, size_t len, int prot, int flags, int64_t physStart = -1) {
@@ -343,6 +366,7 @@ bool RemapFixedIntoRegistered(GuestAllocations::Mutation& mutation, void* addr, 
             if (nativeProtection != PROT_NONE) CommitArenaRange(addr, len, WinProtFromPosix(nativeProtection));
 #else
             if (::mmap(addr, len, nativeProtection, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0) == MAP_FAILED) throw std::system_error(errno, std::generic_category(), "remap anonymous memory");
+            GuestWriteWatch::GuestWriteWatchRegister_nid_postfix(addr, len);
 #endif
         }
     });
@@ -352,13 +376,14 @@ bool RemapFixedIntoRegistered(GuestAllocations::Mutation& mutation, void* addr, 
 void Unmap(void* addr, size_t len) {
 #if defined(__linux__)
     if (munmap(addr, len) != 0) throw std::system_error(errno, std::generic_category(), "munmap failed");
+    GuestWriteWatch::GuestWriteWatchUnregister_nid_postfix(addr, len);
 #else
     if (KernelArena::Get().Contains(addr, len)) munmap(addr, len);
     else munmap_release(addr);
 #endif
 }
 
-void* MapAligned(void* addr, size_t len, int prot, int flags, size_t alignment) {
+void* MapPlaced(void* addr, size_t len, int prot, int flags, size_t alignment) {
     ValidateLength(len);
     alignment = ValidateAlignment(alignment);
     constexpr int GuestMapFixed = 0x10;
@@ -448,6 +473,14 @@ void RecordProtection(const void* addr, size_t len, int prot) {
     std::lock_guard lock(g_protectionLock);
     EraseProtections(start, start + len);
     if (prot >= 0) g_protections.emplace(start, ProtectedRange{start + len, prot});
+}
+
+void* MapAligned(void* addr, size_t len, int prot, int flags, size_t alignment) {
+    void* mapped = MapPlaced(addr, len, prot, flags, alignment);
+#if defined(__linux__)
+    GuestWriteWatch::GuestWriteWatchRegister_nid_postfix(mapped, len);
+#endif
+    return mapped;
 }
 
 void ValidateOutput(void** addr) {

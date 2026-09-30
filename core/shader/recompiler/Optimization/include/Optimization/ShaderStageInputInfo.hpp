@@ -100,18 +100,19 @@ struct ShaderMeshInputInfo: ShaderWorkgroupInputInfo {
     std::uint32_t maxVertices = 0;
     std::uint32_t maxPrimitives = 0;
     std::uint32_t provokingVertex = 0;
+    std::uint32_t esgsItemSize = 0;
 
     [[nodiscard]] std::uint32_t InputPrimitiveSize() const {
-        throw std::runtime_error("shader input helper not implemented");
+        return inputPrimitive == 1u ? 1u : inputPrimitive == 2u ? 2u : 3u;
     }
     [[nodiscard]] std::uint32_t InputPrimitiveStep() const {
-        throw std::runtime_error("shader input helper not implemented");
+        return inputPrimitive == 6u ? 1u : InputPrimitiveSize();
     }
     [[nodiscard]] std::uint32_t InputPrimitiveCount(std::uint32_t vertices) const {
-        throw std::runtime_error("shader input helper not implemented");
+        return vertices < InputPrimitiveSize() ? 0u : (vertices - InputPrimitiveSize()) / InputPrimitiveStep() + 1u;
     }
     [[nodiscard]] std::uint32_t InputVertexCount(std::uint32_t primitives) const {
-        throw std::runtime_error("shader input helper not implemented");
+        return primitives == 0u ? 0u : (primitives - 1u) * InputPrimitiveStep() + InputPrimitiveSize();
     }
 };
 

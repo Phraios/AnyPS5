@@ -426,9 +426,10 @@ void writeMeshConfiguration(Writer& writer, const MeshConfiguration& configurati
     writer.WriteU32(configuration.threadsPerGroup);
     writer.WriteU32(configuration.ldsSizeDwords);
     writer.WriteU32(configuration.provokingVertex);
+    writer.WriteU32(configuration.esgsItemSize);
 }
 
-MeshConfiguration readMeshConfiguration(Reader& reader) {
+MeshConfiguration readMeshConfiguration(Reader& reader, std::uint32_t version) {
     MeshConfiguration configuration{};
     configuration.inputPrimitive = reader.ReadU32();
     configuration.primitivesPerGroup = reader.ReadU32();
@@ -438,6 +439,7 @@ MeshConfiguration readMeshConfiguration(Reader& reader) {
     configuration.threadsPerGroup = reader.ReadU32();
     configuration.ldsSizeDwords = reader.ReadU32();
     configuration.provokingVertex = reader.ReadU32();
+    configuration.esgsItemSize = version >= 4u ? reader.ReadU32() : 4u;
     return configuration;
 }
 
@@ -615,7 +617,7 @@ void writeGraphicsCompileContext(Writer& writer, const GraphicsCompileContext& g
     writer.WriteU32(graphics.draw.instanceCount);
 }
 
-GraphicsCompileContext readGraphicsCompileContext(Reader& reader, DeserializedGraphicsCompileContext& storage) {
+GraphicsCompileContext readGraphicsCompileContext(Reader& reader, DeserializedGraphicsCompileContext& storage, std::uint32_t version) {
     GraphicsCompileContext graphics{};
     graphics.firstUserSgpr = reader.ReadU32();
     const auto programCount = reader.ReadU64();
@@ -639,7 +641,7 @@ GraphicsCompileContext readGraphicsCompileContext(Reader& reader, DeserializedGr
     }
     graphics.linkedPrograms = storage.linkedPrograms;
     if (reader.ReadBool()) {
-        storage.mesh = readMeshConfiguration(reader);
+        storage.mesh = readMeshConfiguration(reader, version);
         graphics.mesh = storage.mesh;
     }
     if (reader.ReadBool()) {
@@ -660,7 +662,7 @@ std::string RequestSerializer::Serialize(const RecompileRequest& request) const 
     std::string buffer;
     Writer writer(buffer);
     writer.WriteU32(0x41505335u);
-    writer.WriteU32(3u);
+    writer.WriteU32(4u);
     writeShaderBinary(writer, request.shader);
     writeGuestContext(writer, request.context);
     writeSpirvTarget(writer, request.target);
@@ -683,7 +685,7 @@ DeserializedRequest RequestSerializer::Deserialize(std::string_view text) const 
     Reader reader(decoded);
     if (reader.ReadU32() != 0x41505335u) throw std::runtime_error("invalid recompile request signature");
     const auto version = reader.ReadU32();
-    if (version < 1u || version > 3u) throw std::runtime_error("unsupported recompile request serialization version");
+    if (version < 1u || version > 4u) throw std::runtime_error("unsupported recompile request serialization version");
     DeserializedRequest result{};
     result.request.shader = readShaderBinary(reader, result.shaderCode, result.shaderHeader);
     result.request.context = readGuestContext(reader, result);
@@ -691,7 +693,7 @@ DeserializedRequest RequestSerializer::Deserialize(std::string_view text) const 
     result.request.layout = readBindingLayout(reader);
     if (reader.ReadBool()) {
         result.graphicsStorage = std::make_unique<DeserializedGraphicsCompileContext>();
-        result.request.graphics = readGraphicsCompileContext(reader, *result.graphicsStorage);
+        result.request.graphics = readGraphicsCompileContext(reader, *result.graphicsStorage, version);
     }
     if (version >= 2u) result.request.useCache = reader.ReadBool();
     if (version >= 3u && result.request.context.compute.has_value()) {

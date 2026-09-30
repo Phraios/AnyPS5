@@ -503,13 +503,23 @@ void CheckBufferAliases(std::span<const CompiledShader> shaders, const ColorTarg
                 const auto address = descriptor.Base48();
                 const auto size = descriptor.GetSize();
                 if (size == 0 || address == 0) continue;
+                const auto element = offset / 4;
+                const bool written = element >= binding.bufferWritten.size() || binding.bufferWritten[element];
                 Require(!overlap(address, size, target.address, target.bytes), "shader buffer aliases the render target");
-                Require(!overlap(address, size, indexAddress, indexBytes), "writable shader buffer aliases the index buffer");
+                Require(!written || !overlap(address, size, indexAddress, indexBytes), "writable shader buffer aliases the index buffer");
             }
         }
     }
 }
 
+}
+
+std::array<std::uint32_t, 4> MeshIndexBufferDescriptor(const Pm4::DrawParameters& draw, std::uint64_t unreadAddress) {
+    const auto address = draw.indexed ? draw.indexAddress : unreadAddress;
+    const auto bytes = draw.indexed ? (static_cast<std::uint64_t>(draw.indexCount) * draw.indexSize + 3u) & ~std::uint64_t{3} : 4u;
+    Require(address != 0 && bytes != 0 && bytes <= 0xffffffffu && (address >> 48u) == 0, "invalid mesh index buffer range");
+    constexpr std::uint32_t RawWord3 = 0x31016facu;
+    return {static_cast<std::uint32_t>(address), static_cast<std::uint32_t>(address >> 32u) & 0xffffu, static_cast<std::uint32_t>(bytes), RawWord3};
 }
 
 std::shared_ptr<std::vector<std::shared_ptr<ShaderResources>>> DrawCopiedWriters() {
@@ -655,7 +665,6 @@ DrawInputs prepareDrawInputs(const Context& context, const State& state, const P
     APS5_LOG_CHARS_OUT_DEBUG("ValidateShaders OK");
     APS5_LOG_OUT_DEBUG("PipelineStages=0x%x", static_cast<unsigned>(inputs.shaderStages));
     if (state.stages.mesh) {
-        Require(draw.firstVertex == 0 && draw.firstInstance == 0, "mesh draw offsets are unsupported");
         APS5_LOG_CHARS_OUT_DEBUG("Mesh path");
         Require(context.meshShader, "device does not support mesh shaders");
         const auto& mesh = *state.stages.mesh;
@@ -995,6 +1004,22 @@ struct RecordedDraw {
     VkShaderStageFlags pushStages = 0;
 };
 
+void pushDrawConstants(const Pipeline& pipeline, VkCommandBuffer commands, const State& state, const Pm4::DrawParameters& draw, std::span<const CompiledShader> shaders, const ShaderResources& resources, const std::array<std::byte, PipelinePushConstantBytes>* bytes, VkShaderStageFlags stages) {
+    auto block = bytes != nullptr ? *bytes : AssemblePushConstants(shaders);
+    if (bytes == nullptr) {
+        resources.PatchPushConstants(block);
+        stages = PushConstantStages(shaders);
+    }
+    if (!state.stages.mesh) {
+        pipeline.PushConstants(commands, stages, block);
+        return;
+    }
+    const std::array<std::uint32_t, ShaderRecompiler::MeshDrawPushBytes / 4> words{draw.indexCount, draw.firstVertex, draw.firstInstance, draw.indexed ? draw.indexSize : 0u, 0u, 0u};
+    static_assert(ShaderRecompiler::MeshDrawPushOffsetBytes + ShaderRecompiler::MeshDrawPushBytes == PipelinePushConstantBytes);
+    std::memcpy(block.data() + ShaderRecompiler::MeshDrawPushOffsetBytes, words.data(), sizeof(words));
+    pipeline.PushConstants(commands, stages | VK_SHADER_STAGE_MESH_BIT_EXT, block);
+}
+
 // The record of a draw whose targets are all resident (`lean`: recorded into the device's open
 // batch, rendering in the general layout): one memory barrier before the pass (earlier writes to
 // the attachments and the draw's inputs visible to it) and one after it, recorded by the recorder
@@ -1156,12 +1181,7 @@ void recordDraw(const Context& context, const State& state, const Pm4::DrawParam
         resources.Bind(commands, VK_PIPELINE_BIND_POINT_GRAPHICS, record.pipeline->Layout());
     }
     APS5_LOG_CHARS_OUT_DEBUG("Resources bound");
-    if (record.pushBytes != nullptr) record.pipeline->PushConstants(commands, record.pushStages, *record.pushBytes);
-    else {
-        auto bytes = AssemblePushConstants(shaders);
-        resources.PatchPushConstants(bytes);
-        record.pipeline->PushConstants(commands, PushConstantStages(shaders), bytes);
-    }
+    pushDrawConstants(*record.pipeline, commands, state, draw, shaders, resources, record.pushBytes, record.pushStages);
     APS5_LOG_CHARS_OUT_DEBUG("Push constants recorded");
     recordDrawCommands(context, commands, state, draw, inputs, record.indirect, argumentBuffer, argumentOffset);
     if (args != nullptr) CountIndirectDraw(record.indirect->path, record.indirect->readMs, rewritten);
@@ -1580,9 +1600,7 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
     APS5_LOG_CHARS_OUT_DEBUG("Pipeline Begin OK");
     resources->Bind(commands, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->Layout());
     APS5_LOG_CHARS_OUT_DEBUG("Resources bound");
-    auto pushBytes = AssemblePushConstants(shaders);
-    resources->PatchPushConstants(pushBytes);
-    pipeline->PushConstants(commands, PushConstantStages(shaders), pushBytes);
+    pushDrawConstants(*pipeline, commands, state, draw, shaders, *resources, nullptr, 0);
     APS5_LOG_CHARS_OUT_DEBUG("Push constants recorded");
     recordDrawCommands(context, commands, state, draw, inputs, args != nullptr ? &indirect : nullptr, argumentBuffer, argumentOffset);
     if (args != nullptr) CountIndirectDraw(indirect.path, indirect.readMs, rewritten);

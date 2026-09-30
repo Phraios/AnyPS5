@@ -174,7 +174,12 @@ void TranslationContext::sBarrier() {
     (void)ir.Emit(IrOpcode::Barrier, IrType::Void, {});
 }
 
-void TranslationContext::sSendmsg(const RdnaInstruction&) {
+void TranslationContext::sSendmsg(const RdnaInstruction& inst) {
+    constexpr std::uint32_t GsAllocReq = 9u;
+    if (program.Resources().stage == IrShaderStage::Mesh && (inst.rawWords[0] & 0xfu) == GsAllocReq) {
+        (void)ir.Emit(IrOpcode::MeshAllocate, IrType::Void, {&ir.GetM0()});
+        return;
+    }
     (void)ir.Emit(IrOpcode::Sendmsg, IrType::Void, {});
 }
 

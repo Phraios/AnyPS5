@@ -8,10 +8,12 @@
 #include <spirv/unified1/spirv.hpp>
 #include <array>
 #include <bit>
+#include <cstdlib>
 #include <cstring>
 #include <initializer_list>
 #include <iostream>
 #include <map>
+#include <set>
 #include <string_view>
 #include <type_traits>
 #include <vector>
@@ -126,6 +128,15 @@ void stateTests() {
     queue.context[0x200] = 2;
     expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "depth");
     queue = makeState();
+    queue.context[0x200] = 0x007007b4;
+    queue.context[0x1b3] = 2;
+    queue.context[0x1b4] = 2;
+    (void)AgcDriver::Graphics::DecodeState(queue);
+    Require(AgcDriver::Graphics::DrawRejection(queue, false).empty(), "a depth write without the depth test was rejected");
+    queue = makeState();
+    queue.context[0x200] = 0x007007b6;
+    expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "depth");
+    queue = makeState();
     queue.context[0x10f] = 0x7fc00000;
     expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "non-finite");
     // The register facade: every register the decoders read is in DrawKeyRegisters (a wrong hit of
@@ -188,10 +199,15 @@ void ShaderStageTests() {
     queue.context[0x1ff] = 64;
     queue.context[0x2ce] = 3;
     queue.context[0x29b] = 2;
+    queue.context[0x2ab] = 4;
     queue.shader[0x8a] = 3u << 29u;
     queue.shader[0x8b] = 3u << 16u;
     auto stages = AgcDriver::Graphics::DecodeState(queue).stages;
     Require(stages.path == AgcDriver::Graphics::ShaderPath::Geometry && stages.mesh && stages.mesh->primitivesPerGroup == 21 && stages.mesh->verticesPerGroup == 63, "geometry assembly changed");
+    Require(stages.mesh->maxVertices == 64 && stages.mesh->maxPrimitives == 21 && stages.mesh->threadsPerGroup == 64 && stages.mesh->esgsItemSize == 4, "geometry subgroup outputs changed");
+    queue.context[0x2ab] = 0;
+    expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "invalid VGT_ESGS_RING_ITEMSIZE");
+    queue.context[0x2ab] = 4;
     queue.userConfig[0x25b] = 0;
     expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "invalid geometry subgroup");
     queue = makeState();
@@ -849,6 +865,7 @@ struct ModuleShape {
     std::uint32_t perVertexLength = 3;
     bool parameterOutput = false;
     bool rectParameters = false;
+    bool secondTarget = false;
 };
 
 void emit(std::vector<std::uint32_t>& out, spv::Op op, std::initializer_list<std::uint32_t> operands) {
@@ -886,6 +903,12 @@ std::vector<std::uint32_t> makeModule(const ModuleShape& shape) {
         emit(declarations, spv::OpVariable, {outputPointer, parameter, spv::StorageClassOutput});
         emit(annotations, spv::OpDecorate, {parameter, spv::DecorationLocation, 0});
         extraInterface.push_back(parameter);
+    }
+    if (shape.secondTarget) {
+        const auto target = id();
+        emit(declarations, spv::OpVariable, {outputPointer, target, spv::StorageClassOutput});
+        emit(annotations, spv::OpDecorate, {target, spv::DecorationLocation, 1});
+        extraInterface.push_back(target);
     }
     if (shape.rectParameters) {
         const auto pointer = id();
@@ -1084,6 +1107,15 @@ void validationTests() {
     }
     {
         ShaderRecompiler::RecompileResult vertex;
+        vertex.spirv = makeModule({});
+        ShaderRecompiler::RecompileResult pixel;
+        pixel.spirv = makeModule({.fragment = true, .secondTarget = true});
+        const std::array<AgcDriver::Graphics::CompiledShader, 2> shaders{{{ShaderRecompiler::ShaderStage::Vertex, &vertex, 0}, {ShaderRecompiler::ShaderStage::Fragment, &pixel, 0}}};
+        const VkPhysicalDeviceSubgroupProperties subgroup{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES};
+        Require(state.colors.empty() && AgcDriver::Graphics::ValidateShaders(shaders, state, subgroup, false) == std::set<std::uint32_t>{0u}, "an export past the attachments was not dropped");
+    }
+    {
+        ShaderRecompiler::RecompileResult vertex;
         vertex.spirv = makeModule({.vertexInput = true});
         ShaderRecompiler::VertexAttribute attribute{0, 4, {{0x1000, 32u << 16u, 3, 77u << 12u}}, 0};
         const std::array<AgcDriver::Graphics::CompiledShader, 2> shaders{{{ShaderRecompiler::ShaderStage::Vertex, &vertex, 0}, {ShaderRecompiler::ShaderStage::Fragment, &fragment, 0}}};
@@ -1107,6 +1139,14 @@ void validationTests() {
         attribute.resource.fields[2] = 8;
         expectFailure([&] { AgcDriver::Graphics::VertexBufferReadSize(attribute, 0, 1); }, "byte range");
         attribute.resource.fields[3] = 113u << 12u;
+        expectFailure([&] { AgcDriver::Graphics::DecodeVertexFormat(attribute); }, "unsupported vertex format");
+        attribute.resource.fields[3] = 50u << 12u;
+        Require(AgcDriver::Graphics::DecodeVertexFormat(attribute).format == VK_FORMAT_A2B10G10R10_UNORM_PACK32 && AgcDriver::Graphics::DecodeVertexFormat(attribute).bytes == 4, "2_10_10_10 vertex format was not decoded");
+        attribute.resource.fields[3] = 55u << 12u;
+        Require(AgcDriver::Graphics::DecodeVertexFormat(attribute).format == VK_FORMAT_A2B10G10R10_SINT_PACK32 && std::string_view(AgcDriver::Graphics::DecodeVertexFormat(attribute).scalar) == "i32", "2_10_10_10 sint vertex format was not decoded");
+        attribute.resource.fields[3] = 36u << 12u;
+        Require(AgcDriver::Graphics::DecodeVertexFormat(attribute).format == VK_FORMAT_B10G11R11_UFLOAT_PACK32, "10_11_11 float vertex format was not decoded");
+        attribute.resource.fields[3] = 43u << 12u;
         expectFailure([&] { AgcDriver::Graphics::DecodeVertexFormat(attribute); }, "unsupported vertex format");
         attribute.resource.fields = {0x1000, 32u << 16u, 3, 77u << 12u};
         attribute.components = 2;
@@ -1221,8 +1261,36 @@ void validationTests() {
 
 }
 
+bool recompilesDebugBranch(std::uint32_t opcode) {
+    auto queue = makeState();
+    queue.context[0x1b3] = 0x2u;
+    queue.context[0x1b4] = 0x2u;
+    const auto state = AgcDriver::Graphics::DecodeState(queue);
+    const auto pixel = AgcDriver::Graphics::DecodePixelStageInfo(queue.context, AgcDriver::Graphics::ExportMappings(state));
+    const std::array<std::uint32_t, 4> code{0xbf800000u | (opcode << 16u) | 1u, 0xf800180fu, 0x00000000u, 0xbf810000u};
+    ShaderRecompiler::RecompileRequest request{};
+    request.shader = {ShaderRecompiler::ShaderStage::Fragment, 0x30000u, code, 0, {}};
+    request.context.waveSize = 64;
+    request.context.pixel = pixel;
+    request.target.vulkanVersion = 0x00401000u;
+    request.target.spirvVersion = 0x00010300u;
+    request.target.subgroupSize = 64;
+    request.target.fragmentShaderBarycentricEnabled = true;
+    request.layout.pushConstantSizeBytes = 128;
+    request.useCache = false;
+    return !ShaderRecompiler::Recompile(request).spirv.Words().empty();
+}
+
+void debugBranchTests() {
+    for (const auto opcode : {0x17u, 0x18u, 0x19u, 0x1au}) Require(recompilesDebugBranch(opcode), "a conditional debug branch did not recompile");
+}
+
 int main() {
+#ifdef _WIN32
     _putenv_s("APS5_PIN_WAIT_MS", "200");
+#else
+    setenv("APS5_PIN_WAIT_MS", "200", 1);
+#endif
     try {
         {
             const AgcDriver::Graphics::Context context{};
@@ -1254,6 +1322,7 @@ int main() {
         InitialContextTests();
         pushConstantTests();
         resourceTests();
+        debugBranchTests();
         validationTests();
         rectListTests();
         mock = MockVulkan{};

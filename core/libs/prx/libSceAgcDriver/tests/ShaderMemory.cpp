@@ -3,10 +3,12 @@
 #include "Optimization/RequestMemoryView.hpp"
 #include "Optimization/ResourceMaterializer.hpp"
 #include "Optimization/ResourceProgram.hpp"
+#include "Optimization/ShaderStageInputInfo.hpp"
 #include "Optimization/SrtWalker/SrtFlatSlotClasses.hpp"
 #if ANYPS5_ENABLE_SPIRV_TOOLS
 #include "SpirvBackend/SpirvOptimizer.hpp"
 #endif
+#include "CacheKey.hpp"
 #include <algorithm>
 #include <array>
 #include <iostream>
@@ -218,8 +220,14 @@ void verifyBindlessTable() {
         return request;
     };
     const auto covered = [](const std::vector<MemoryRegion>& regions, const void* pointer, std::size_t bytes) {
-        const auto address = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(pointer));
-        return std::any_of(regions.begin(), regions.end(), [&](const MemoryRegion& region) { return address >= region.guestAddress && address + bytes <= region.guestAddress + region.bytes.size(); });
+        auto address = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(pointer));
+        const auto end = address + bytes;
+        while (address < end) {
+            const auto region = std::find_if(regions.begin(), regions.end(), [&](const MemoryRegion& candidate) { return address >= candidate.guestAddress && address < candidate.guestAddress + candidate.bytes.size(); });
+            if (region == regions.end()) return false;
+            address = region->guestAddress + region->bytes.size();
+        }
+        return true;
     };
     const auto mappingOf = [&](const ResourceSnapshot& snapshot) {
         require(snapshot.flattenedSrt.size() >= 1u + 2u * slots, "bindless: the mapping block is missing from the flattened SRT");
@@ -405,6 +413,39 @@ void verifyProgramCounterRelativeData() {
     require(moved.cacheHit, "program counter data: relocating the shader recompiled it");
     require(dataBase(moved) == codeAddress + 0x1000u + 56u, "program counter data: the relocated shader bound the old address");
 }
+void verifyMeshConfiguration() {
+    using namespace ShaderRecompiler;
+    ShaderMeshInputInfo list;
+    list.inputPrimitive = 4u;
+    require(list.InputPrimitiveSize() == 3u && list.InputPrimitiveStep() == 3u && list.InputVertexCount(21u) == 63u && list.InputPrimitiveCount(63u) == 21u && list.InputPrimitiveCount(2u) == 0u && list.InputVertexCount(0u) == 0u, "triangle list subgroup sizes changed");
+    ShaderMeshInputInfo strip;
+    strip.inputPrimitive = 6u;
+    require(strip.InputPrimitiveSize() == 3u && strip.InputPrimitiveStep() == 1u && strip.InputVertexCount(21u) == 23u && strip.InputPrimitiveCount(23u) == 21u, "triangle strip subgroup sizes changed");
+    ShaderMeshInputInfo lines;
+    lines.inputPrimitive = 2u;
+    ShaderMeshInputInfo points;
+    points.inputPrimitive = 1u;
+    require(lines.InputPrimitiveSize() == 2u && lines.InputPrimitiveStep() == 2u && points.InputPrimitiveSize() == 1u && points.InputVertexCount(5u) == 5u, "line or point subgroup sizes changed");
+
+    static constexpr std::array<std::uint32_t, 1> code{0xbf810000u};
+    RecompileRequest request{};
+    request.shader = {ShaderStage::Mesh, 0x10000u, code, 0, {}};
+    request.context.waveSize = 64;
+    const MeshConfiguration mesh{4u, 21u, 63u, 64u, 21u, 64u, 256u, 0u, 12u};
+    request.graphics = GraphicsCompileContext{0u, {}, mesh, std::nullopt, {}};
+    const auto replay = RequestSerializer{}.Deserialize(RequestSerializer{}.Serialize(request));
+    require(replay.request.graphics.has_value() && replay.request.graphics->mesh.has_value() && replay.request.graphics->mesh->esgsItemSize == 12u && replay.request.graphics->mesh->primitivesPerGroup == 21u, "mesh configuration was lost in serialization");
+    std::vector<std::uint64_t> key;
+    RecompileCacheKey::Build(request, key);
+    const auto first = key;
+    auto other = request;
+    auto otherMesh = mesh;
+    otherMesh.esgsItemSize = 16u;
+    other.graphics = GraphicsCompileContext{0u, {}, otherMesh, std::nullopt, {}};
+    RecompileCacheKey::Build(other, key);
+    require(key != first && RecompileCacheKey::ContextHash(request) != RecompileCacheKey::ContextHash(other), "the cache keys ignore the mesh configuration");
+}
+
 }
 
 int main() {
@@ -414,6 +455,7 @@ int main() {
         verifyPureFlatSlots();
         verifyBindlessTable();
         verifyProgramCounterRelativeData();
+        verifyMeshConfiguration();
 #if ANYPS5_ENABLE_SPIRV_TOOLS
         const std::vector<std::uint32_t> minimalSpirv{
             0x07230203u, 0x00010000u, 0u, 5u, 0u,
