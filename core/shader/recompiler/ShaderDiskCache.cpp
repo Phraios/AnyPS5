@@ -305,7 +305,7 @@ void decodeResult(Reader& reader, RecompileResult& result) {
     std::vector<std::uint8_t> pushConstants;
     reader.Values(pushConstants);
     result.pushConstants.resize(pushConstants.size());
-    std::memcpy(result.pushConstants.data(), pushConstants.data(), pushConstants.size());
+    if (!pushConstants.empty()) std::memcpy(result.pushConstants.data(), pushConstants.data(), pushConstants.size());
     reader.Value(result.bdaAbiVersion);
     reader.Value(result.memoryOffsetDword);
     reader.List(result.vertexAttributes, 28, [](Reader& in, VertexAttribute& attribute) {
@@ -546,7 +546,7 @@ void decodeAllocation(Reader& reader, BindingAllocationResult& allocation) {
     std::vector<std::uint8_t> pushConstants;
     reader.Values(pushConstants);
     allocation.pushConstants.resize(pushConstants.size());
-    std::memcpy(allocation.pushConstants.data(), pushConstants.data(), pushConstants.size());
+    if (!pushConstants.empty()) std::memcpy(allocation.pushConstants.data(), pushConstants.data(), pushConstants.size());
 }
 
 constexpr std::string_view NeutralSwitches[] = {

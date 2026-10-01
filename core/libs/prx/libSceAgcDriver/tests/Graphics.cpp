@@ -186,7 +186,7 @@ void hardwareScreenOffsetTests() {
 
 void ShaderStageTests() {
     auto queue = makeState();
-    for (const auto routing : {0x2000u, 0x2010u, 0x02002000u, 0x02002010u}) {
+    for (const auto routing : {0x2000u, 0x2010u}) {
         for (const auto vertexWave32 : {false, true}) {
             for (const auto fragmentWave32 : {false, true}) {
                 queue.context[0x2d5] = routing | (vertexWave32 ? 0x00400000u : 0u);
@@ -210,6 +210,17 @@ void ShaderStageTests() {
     auto stages = AgcDriver::Graphics::DecodeState(queue).stages;
     Require(stages.path == AgcDriver::Graphics::ShaderPath::Geometry && stages.mesh && stages.mesh->primitivesPerGroup == 21 && stages.mesh->verticesPerGroup == 63, "geometry assembly changed");
     Require(stages.mesh->maxVertices == 64 && stages.mesh->maxPrimitives == 21 && stages.mesh->threadsPerGroup == 64 && stages.mesh->esgsItemSize == 4, "geometry subgroup outputs changed");
+    for (const auto routing : {0x02002000u, 0x02002010u, 0x02402000u, 0x02402010u}) {
+        queue.context[0x2d5] = routing;
+        queue.context[0x2ce] = 0;
+        queue.context[0x29b] = 0;
+        const auto pass = AgcDriver::Graphics::DecodeState(queue).stages;
+        Require(pass.path == AgcDriver::Graphics::ShaderPath::Geometry && pass.mesh && pass.mesh->passthrough && pass.mesh->verticesPerGroup == 63 && pass.mesh->primitivesPerGroup == 21, "passthrough subgroup assembly changed");
+        Require(pass.vertexWaveSize == ((routing & 0x00400000u) ? 32u : 64u), "passthrough wave size changed");
+    }
+    queue.context[0x2d5] = 0x2020;
+    queue.context[0x2ce] = 3;
+    queue.context[0x29b] = 2;
     queue.context[0x2ab] = 0;
     expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "invalid VGT_ESGS_RING_ITEMSIZE");
     queue.context[0x2ab] = 4;
@@ -282,7 +293,7 @@ bool readsBuiltin(const std::vector<spv::BuiltIn>& read, spv::BuiltIn builtin) {
     return std::find(read.begin(), read.end(), builtin) != read.end();
 }
 
-std::vector<std::uint32_t> pixelNoPerspectiveLocations() {
+std::vector<std::uint32_t> pixelNoPerspectiveLocations(bool barycentricEnabled) {
     auto queue = makeState();
     queue.context[0x1b3] = 0x22u;
     queue.context[0x1b4] = 0x22u;
@@ -298,18 +309,27 @@ std::vector<std::uint32_t> pixelNoPerspectiveLocations() {
     request.target.vulkanVersion = 0x00401000u;
     request.target.spirvVersion = 0x00010300u;
     request.target.subgroupSize = 64;
-    request.target.fragmentShaderBarycentricEnabled = true;
+    request.target.fragmentShaderBarycentricEnabled = barycentricEnabled;
     request.layout.pushConstantSizeBytes = 128;
     request.useCache = false;
     const auto result = ShaderRecompiler::Recompile(request);
     const auto& words = result.spirv.Words();
     std::map<std::uint32_t, std::uint32_t> locations;
     std::vector<std::uint32_t> noPerspective;
+    std::uint32_t perVertex = 0;
+    bool perspectiveBarycentrics = false;
+    bool linearBarycentrics = false;
     for (std::size_t at = 5; at < words.size() && (words[at] >> 16u) != 0; at += words[at] >> 16u) {
         if (static_cast<spv::Op>(words[at] & 0xffffu) != spv::OpDecorate) continue;
         if (words[at + 2] == spv::DecorationLocation) locations[words[at + 1]] = words[at + 3];
         if (words[at + 2] == spv::DecorationNoPerspective) noPerspective.push_back(words[at + 1]);
+        if (words[at + 2] == spv::DecorationPerVertexKHR) perVertex++;
+        if (words[at + 2] == spv::DecorationBuiltIn) {
+            perspectiveBarycentrics |= words[at + 3] == spv::BuiltInBaryCoordKHR;
+            linearBarycentrics |= words[at + 3] == spv::BuiltInBaryCoordNoPerspKHR;
+        }
     }
+    if (barycentricEnabled) Require(perVertex == 2u && perspectiveBarycentrics && linearBarycentrics, "explicit interpolation must preserve both parameter vertices and both barycentric inputs");
     std::vector<std::uint32_t> result2;
     for (const auto id : noPerspective) result2.push_back(locations.count(id) != 0 ? locations.at(id) : 0xffffffffu);
     return result2;
@@ -350,8 +370,9 @@ void PixelInputLayoutTests() {
         const auto read = pixelBuiltinsRead(0x106u, 0x106u, source);
         Require(readsBuiltin(read, spv::BuiltInBaryCoordKHR) && !readsBuiltin(read, spv::BuiltInFragCoord), "a centroid-layout I/J VGPR does not hold the barycentrics: v" + std::to_string(source));
     }
-    const auto noPerspective = pixelNoPerspectiveLocations();
+    const auto noPerspective = pixelNoPerspectiveLocations(false);
     Require(noPerspective.size() == 1 && noPerspective[0] == 1u, "only the parameter interpolated through the linear pair must be NoPerspective");
+    Require(pixelNoPerspectiveLocations(true).empty(), "explicit interpolation must not interpolate parameter arrays a second time");
     auto read = pixelBuiltinsRead(0x106u, 0x106u, 4u);
     Require(readsBuiltin(read, spv::BuiltInFragCoord) && !readsBuiltin(read, spv::BuiltInBaryCoordKHR), "POS_X is not in v4 after the center and centroid pairs");
     read = pixelBuiltinsRead(0x326u, 0x326u, 5u);
@@ -1389,10 +1410,10 @@ void pixelParameterSlotTests() {
     const std::array<std::uint32_t, 7> shared{0xc8100000u, 0xc8110001u, 0xc8140500u, 0xc8150501u, 0xf800180fu, 0x05040504u, 0xbf810000u};
     pixel = recompilePixel({0x3u, 0x3u}, shared);
     inputs = locatedInputs(pixel.spirv.Words());
-    Require(inputs.size() == 1 && inputs[0].location == 3 && !inputs[0].perVertex && !inputs[0].flat, "inputs reading one slot were not declared once at the slot");
+    Require(inputs.size() == 1 && inputs[0].location == 3 && inputs[0].perVertex && !inputs[0].flat, "inputs reading one slot were not declared once at the slot");
     pixel = recompilePixel({0x404u, 0x0u}, shared);
     inputs = locatedInputs(pixel.spirv.Words());
-    Require(inputs.size() == 2 && inputs[0].location == 0 && !inputs[0].flat && inputs[1].location == 4 && inputs[1].flat, "flat and interpolated inputs of different slots moved");
+    Require(inputs.size() == 2 && inputs[0].location == 0 && inputs[0].perVertex && inputs[1].location == 4 && inputs[1].perVertex, "flat and interpolated inputs of different slots moved");
     pixel = recompilePixel({0x20u, 0x2320u}, shared);
     Require(locatedInputs(pixel.spirv.Words()).empty(), "a defaulted input was declared as a parameter");
     AgcDriver::Graphics::ValidateShaders(shaders, state, subgroup, true);

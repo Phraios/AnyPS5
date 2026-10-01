@@ -34,6 +34,7 @@ public:
         append(key, request.target);
         append(key, DebugProbeActive());
         append(key, RayTracingStrict());
+        append(key, RayTracingMiss());
     }
 
     // A hash over every field Build appends except the code, the target and the probe flag: the
@@ -78,6 +79,7 @@ private:
         const auto* mesh = request.graphics && request.graphics->mesh ? &*request.graphics->mesh : nullptr;
         append(key, mesh != nullptr);
         if (mesh == nullptr) return;
+        append(key, mesh->passthrough);
         for (const auto value : {mesh->inputPrimitive, mesh->primitivesPerGroup, mesh->verticesPerGroup, mesh->maxVertices, mesh->maxPrimitives, mesh->threadsPerGroup, mesh->ldsSizeDwords, mesh->provokingVertex, mesh->esgsItemSize}) append(key, value);
     }
 

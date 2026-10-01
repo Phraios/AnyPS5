@@ -449,6 +449,13 @@ void verifyMeshConfiguration() {
     other.graphics = GraphicsCompileContext{0u, {}, otherMesh, std::nullopt, {}};
     RecompileCacheKey::Build(other, key);
     require(key != first && RecompileCacheKey::ContextHash(request) != RecompileCacheKey::ContextHash(other), "the cache keys ignore the mesh configuration");
+    otherMesh = mesh;
+    otherMesh.passthrough = true;
+    other.graphics = GraphicsCompileContext{0u, {}, otherMesh, std::nullopt, {}};
+    RecompileCacheKey::Build(other, key);
+    require(key != first && RecompileCacheKey::ContextHash(request) != RecompileCacheKey::ContextHash(other), "the cache keys ignore passthrough input layout");
+    const auto passReplay = RequestSerializer{}.Deserialize(RequestSerializer{}.Serialize(other));
+    require(passReplay.request.graphics->mesh->passthrough && !replay.request.graphics->mesh->passthrough, "passthrough input layout was lost in serialization");
 }
 
 ShaderRecompiler::ShaderPixelStageInfo twoParameterPixel() {
@@ -573,7 +580,7 @@ std::vector<std::pair<std::uint32_t, bool>> slotInputs(std::initializer_list<std
 void verifyPixelParameterSlots() {
     static constexpr std::array<std::uint32_t, 7> shared{0xc8100000u, 0xc8110001u, 0xc8140500u, 0xc8150501u, 0xf800180fu, 0x05040504u, 0xbf810000u};
     auto inputs = slotInputs({0x3u, 0x3u}, shared);
-    require(inputs.size() == 1u && inputs[0].first == 3u && !inputs[0].second, "inputs reading one slot were not declared once at the slot");
+    require(inputs.size() == 1u && inputs[0].first == 3u && inputs[0].second, "inputs reading one slot were not declared once at the slot");
     inputs = slotInputs({0x404u, 0x0u}, shared);
     require(inputs.size() == 2u && inputs[0].first == 0u && inputs[1].first == 4u, "inputs of different slots moved");
     require(slotInputs({0x20u, 0x2320u}, shared).empty(), "a defaulted input was declared as a parameter");

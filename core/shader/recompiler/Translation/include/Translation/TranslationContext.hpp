@@ -12,9 +12,10 @@ public:
     TranslationContext(IrProgram& program, IrBlock& block, std::uint32_t vectorLimit);
 
     void TranslateInstruction(const RdnaInstruction& instruction);
-    void SetPixelInput(const ShaderPixelInputInfo* info) { pixelInput = info; }
+    void SetPixelInput(const ShaderPixelInputInfo* info, bool barycentricEnabled) { pixelInput = info; fragmentShaderBarycentricEnabled = barycentricEnabled; }
     void TranslateEmbeddedFetch(const RdnaInstruction& instruction, std::uint32_t attribute, std::uint32_t componentCount, const ShaderBufferResource& resource);
     void AddBranchCondition(const BasicBlock& source, BlockInfo& info);
+    void TranslateCodeTableLoad(const RdnaInstruction& instruction, const ControlFlowGraph::CodeTableLoad& table);
 
 private:
     struct AddressOperands {
@@ -152,6 +153,7 @@ private:
     bool floatCube(const RdnaInstruction& inst, std::uint32_t resultKind);
     bool integer16Shift(const RdnaInstruction& inst, IrOpcode opcode, bool arithmetic);
     bool integer16Binary(const RdnaInstruction& inst, IrOpcode opcode, bool sign);
+    bool integer16Ternary(const RdnaInstruction& inst, IrOpcode opcode, bool sign);
     bool vMed3I16(const RdnaInstruction& inst);
     bool packedInteger16Shift(const RdnaInstruction& inst, IrOpcode opcode, bool arithmetic);
     bool packedInteger16Binary(const RdnaInstruction& inst, IrOpcode opcode);
@@ -223,7 +225,7 @@ private:
     void vReadlaneB32(const RdnaInstruction& inst);
     void vWritelaneB32(const RdnaInstruction& inst);
     void vPermlane16B32(const RdnaInstruction& inst, bool x16);
-    void vInterpP1F32();
+    void vInterpP1F32(const RdnaInstruction& inst);
     void vInterpP2F32(const RdnaInstruction& inst);
     void vInterpMovF32(const RdnaInstruction& inst);
     void eXP(const RdnaInstruction& inst);
@@ -234,6 +236,7 @@ private:
 
     IrProgram& program;
     const ShaderPixelInputInfo* pixelInput = nullptr;
+    bool fragmentShaderBarycentricEnabled = false;
     IrBuilder ir;
     IrBlock& block;
     IrU1 instructionBranchCondition;

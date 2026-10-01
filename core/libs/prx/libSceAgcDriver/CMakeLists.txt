@@ -404,6 +404,18 @@ target_link_libraries(agc_driver_mix_precision_tests PRIVATE libSceAgcDriver SDL
 set_target_properties(agc_driver_mix_precision_tests PROPERTIES CXX_EXTENSIONS OFF)
 configure_windows_unwind(agc_driver_mix_precision_tests)
 
+add_test_executable(agc_driver_sdwa_destination_tests EXCLUDE_FROM_ALL
+        tests/SdwaDestination.cpp
+)
+target_include_directories(agc_driver_sdwa_destination_tests PRIVATE
+        ${LIBS_INCLUDE_DIR}
+        ${CMAKE_SOURCE_DIR}/core/shader/recompiler
+        ${CMAKE_SOURCE_DIR}/3rdparty/Vulkan-Headers/include
+)
+target_link_libraries(agc_driver_sdwa_destination_tests PRIVATE libSceAgcDriver SDL2-static libc)
+set_target_properties(agc_driver_sdwa_destination_tests PROPERTIES CXX_EXTENSIONS OFF)
+configure_windows_unwind(agc_driver_sdwa_destination_tests)
+
 if(BUILD_TESTING)
     foreach(agcTest IN ITEMS agc_driver_tests agc_shader_memory_tests agc_structurizer_tests agc_dpp_write_tests agc_shader_disk_cache_tests agc_shader_control_flow_tests agc_driver_flip_tests agc_driver_pm4_tests agc_driver_graphics_tests)
         string(REGEX REPLACE "_tests$" "" agcTestName "${agcTest}")
@@ -593,6 +605,14 @@ if(BUILD_TESTING)
     add_test(NAME vector_compare_i16_u16 COMMAND vector_compare_i16_u16_tests)
     if(WIN32)
         set_tests_properties(vector_compare_i16_u16 PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+    endif()
+    add_test_executable(vector_min_max_med16_tests ${LIBS_INCLUDE_DIR}/tests/VectorMinMaxMed16.cpp)
+    target_link_libraries(vector_min_max_med16_tests PRIVATE shader_recompiler_agc_driver libc)
+    configure_windows_unwind(vector_min_max_med16_tests)
+    add_test(NAME vector_min_max_med16 COMMAND vector_min_max_med16_tests)
+    if(WIN32)
+        set_tests_properties(vector_min_max_med16 PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
     endif()
     add_test_executable(guest_indexed_draw_tests ${LIBS_INCLUDE_DIR}/tests/GuestIndexedDraw.cpp)

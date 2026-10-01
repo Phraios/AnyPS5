@@ -225,6 +225,7 @@ struct MeshConfiguration {
     std::uint32_t ldsSizeDwords;
     std::uint32_t provokingVertex;
     std::uint32_t esgsItemSize = 0;
+    bool passthrough = false;
 };
 
 struct TessellationConfiguration {
@@ -416,6 +417,7 @@ struct ResourceCapture;
 void SetDebugProbeActive(bool active);
 [[nodiscard]] bool DebugProbeActive();
 [[nodiscard]] bool RayTracingStrict();
+[[nodiscard]] bool RayTracingMiss();
 
 struct RectListShaders {
     RecompileResult control;

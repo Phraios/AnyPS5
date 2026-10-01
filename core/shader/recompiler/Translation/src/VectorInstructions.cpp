@@ -432,6 +432,16 @@ bool TranslationContext::emitVector(const RdnaInstruction& inst) {
         return integer16Binary(inst, IrOpcode::ISub32, false);
     case RdnaOpcode::VMed3I16:
         return vMed3I16(inst);
+    case RdnaOpcode::VMin3I16:
+        return integer16Ternary(inst, IrOpcode::SMinTri32, true);
+    case RdnaOpcode::VMin3U16:
+        return integer16Ternary(inst, IrOpcode::UMinTri32, false);
+    case RdnaOpcode::VMax3I16:
+        return integer16Ternary(inst, IrOpcode::SMaxTri32, true);
+    case RdnaOpcode::VMax3U16:
+        return integer16Ternary(inst, IrOpcode::UMaxTri32, false);
+    case RdnaOpcode::VMed3U16:
+        return integer16Ternary(inst, IrOpcode::UMedTri32, false);
     case RdnaOpcode::VMinI16:
         return integer16Binary(inst, IrOpcode::SMin32, true);
     case RdnaOpcode::VMaxI16:
