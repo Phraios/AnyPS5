@@ -1,6 +1,13 @@
 cmake_minimum_required(VERSION 3.20)
 project(Relinker CXX)
 
+set(ANYPS5_TEST_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests")
+
+function(add_test_executable target)
+    add_executable(${target} ${ARGN})
+    set_target_properties(${target} PROPERTIES RUNTIME_OUTPUT_DIRECTORY "$<1:${ANYPS5_TEST_OUTPUT_DIRECTORY}>")
+endfunction()
+
 option(BUILD_TESTING "Build and register relinker tests" OFF)
 if(BUILD_TESTING)
     enable_testing()
