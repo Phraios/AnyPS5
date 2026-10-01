@@ -457,6 +457,11 @@ bool WaitComparesValue(std::span<const std::uint32_t> packet, std::uint64_t valu
     return waitCompares(packet, wide, value);
 }
 
+std::size_t WaitAwaitedBytes(std::span<const std::uint32_t> packet) {
+    const bool wide = ((packet[0] >> 8u) & 0xffu) == 0x93u;
+    return wide && (packet.size() < 8 || packet[7] != 0) ? 8 : 4;
+}
+
 std::optional<LabelWrite> DecodeLabelWrite(std::span<const std::uint32_t> packet) {
     const auto opcode = (packet[0] >> 8u) & 0xffu;
     if (opcode == 0x49 && packet.size() >= 7) {

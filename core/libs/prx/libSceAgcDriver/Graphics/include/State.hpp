@@ -8,6 +8,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include "Recompiler.hpp"
 
@@ -45,6 +46,7 @@ struct ColorTarget {
     std::uint32_t mipCount = 1;
     std::uint32_t mip = 0;
     bool mipTail = false;
+    std::array<std::uint32_t, 2> clearWords{};
 };
 
 struct DepthTarget {
@@ -87,6 +89,14 @@ struct State {
 ShaderStages DecodeShaderStages(const QueueState& queue);
 State DecodeState(const QueueState& queue);
 std::array<std::uint8_t, 8> ExportMappings(const State& state);
+ColorTarget DecodeColorBuffer(const Registers& context, std::uint32_t slot);
+
+struct ColorMetadataPass {
+    enum class Mode { EliminateFastClear, DccDecompress };
+    Mode mode;
+    std::vector<ColorTarget> targets;
+};
+std::optional<ColorMetadataPass> DecodeColorMetadataPass(const QueueState& queue);
 // The message DecodeState (or the pixel stage decode after it) would throw for the register rules
 // this precheck covers, evaluated without exceptions before the draw is decoded; empty when they
 // pass (DecodeState still checks everything). A register a rule needs that is absent is no verdict.

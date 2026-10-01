@@ -130,6 +130,7 @@ struct Context {
     // (bindless image tables in graphics stages).
     bool descriptorIndexing = false;
     bool primitiveListRestart = false;
+    bool imageViewMinLod = false;
 
     template<typename TFunction>
     TFunction Function(const char* name) const {

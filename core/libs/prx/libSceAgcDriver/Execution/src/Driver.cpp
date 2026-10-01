@@ -203,6 +203,8 @@ struct Submission {
     // Record-order stamp (Driver::eventSerial) taken when the game submitted: a WAIT_REG_MEM of this
     // submission trusts only labels the recorder noted with a newer stamp (see Recorder::NoteLabel).
     std::uint64_t received = 0;
+    std::vector<std::uint64_t> labelWrites;
+    std::set<std::size_t> heldAtSubmit;
     std::chrono::steady_clock::time_point enqueuedAt{};
     const std::uint32_t* rewindTail = nullptr;
     std::size_t rewindWords = 0;
@@ -510,6 +512,7 @@ private:
             stopping = true;
             for (auto& [queue, worker] : workers) {
                 worker.pending.clear();
+                worker.unfinishedWrites.clear();
                 worker.queued.store(0, std::memory_order_release);
             }
         }
@@ -591,6 +594,7 @@ public:
                 require(wait != nullptr, "video output returned a null rendering wait");
                 submission.renderingWaits.emplace(cursor, std::move(wait));
             }
+            noteHeldAtSubmit(submission, cursor);
             if (words[0] == FlipPacketHeader) {
                 const auto output = outputs.find(words[1]);
                 require(output != outputs.end(), "flip references an unregistered video output");
@@ -740,6 +744,7 @@ public:
                     for (const auto& [offset, flip] : item.flips) flip->Fail(failure);
                 }
                 worker.pending.clear();
+                worker.unfinishedWrites.clear();
                 worker.queued.store(0, std::memory_order_release);
             }
         }
@@ -941,6 +946,7 @@ private:
         std::deque<Submission> pending;
         // pending.size(), readable without `mutex` (the worker's submission-end decision).
         std::atomic<std::uint64_t> queued{0};
+        std::unordered_map<std::uint64_t, std::uint32_t> unfinishedWrites;
         std::thread thread;
     };
     std::map<std::uint32_t, QueueWorker> workers;
@@ -1446,7 +1452,7 @@ private:
         if (std::memcmp(&s.viewport, &t.viewport, sizeof(VkViewport)) != 0 || std::memcmp(&s.scissor, &t.scissor, sizeof(VkRect2D)) != 0) return false;
         const auto& p = a.pixel;
         const auto& q = b.pixel;
-        if (p.interpolatorCount != q.interpolatorCount || p.interpolatorSettings != q.interpolatorSettings || p.wave32 != q.wave32 || p.perspectiveCenterVgpr != q.perspectiveCenterVgpr || p.hasPerspectiveCenterVgpr != q.hasPerspectiveCenterVgpr || p.posX != q.posX || p.posY != q.posY || p.posZ != q.posZ || p.posW != q.posW || p.frontFace != q.frontFace || p.ancillary != q.ancillary || p.sampleShading != q.sampleShading || p.noPerspective != q.noPerspective || p.pixelKillEnable != q.pixelKillEnable || p.depthExportEnable != q.depthExportEnable || p.sampleMaskExportEnable != q.sampleMaskExportEnable || p.earlyZ != q.earlyZ || p.executeOnNoop != q.executeOnNoop || p.targetOutputMode != q.targetOutputMode || p.targetExportMapping != q.targetExportMapping) return false;
+        if (p.interpolatorCount != q.interpolatorCount || p.interpolatorSettings != q.interpolatorSettings || p.wave32 != q.wave32 || p.inputAddr != q.inputAddr || p.hasPerspectiveCenterVgpr != q.hasPerspectiveCenterVgpr || p.perspectiveCentroid != q.perspectiveCentroid || p.posX != q.posX || p.posY != q.posY || p.posZ != q.posZ || p.posW != q.posW || p.frontFace != q.frontFace || p.ancillary != q.ancillary || p.sampleShading != q.sampleShading || p.noPerspective != q.noPerspective || p.linearCentroid != q.linearCentroid || p.pixelKillEnable != q.pixelKillEnable || p.depthExportEnable != q.depthExportEnable || p.sampleMaskExportEnable != q.sampleMaskExportEnable || p.earlyZ != q.earlyZ || p.executeOnNoop != q.executeOnNoop || p.targetOutputMode != q.targetOutputMode || p.targetExportMapping != q.targetExportMapping) return false;
         if (a.roles != b.roles || a.programs.size() != b.programs.size()) return false;
         for (std::size_t i = 0; i < a.programs.size(); ++i) {
             const auto& x = a.programs[i];
@@ -1584,6 +1590,44 @@ private:
     std::map<std::uint32_t, QueueState> queues;
     std::map<std::uint32_t, std::shared_ptr<IVideoOutput>> outputs;
     DevicePointer device;
+    struct LabelStore {
+        std::uint64_t stamp = 0;
+        std::uint32_t value = 0;
+    };
+    static constexpr std::size_t LabelStoreHistory = 4;
+    std::mutex labelStoresMutex;
+    std::unordered_map<std::uint64_t, std::array<LabelStore, LabelStoreHistory>> labelStores;
+
+    void noteLabelStore(std::uint64_t address, std::span<const std::byte> bytes, std::uint64_t stamp) {
+        if (bytes.empty() || bytes.size() > 64 || bytes.size() % 4 != 0 || address % 4 != 0) return;
+        std::lock_guard lock(labelStoresMutex);
+        for (std::size_t offset = 0; offset < bytes.size(); offset += 4) {
+            auto& history = labelStores[address + offset];
+            std::shift_right(history.begin(), history.end(), 1);
+            history[0].stamp = stamp;
+            std::memcpy(&history[0].value, bytes.data() + offset, 4);
+        }
+    }
+
+    bool storedSince(std::span<const std::uint32_t> packet, std::uint64_t address, std::size_t bytes, std::uint64_t received) {
+        std::lock_guard lock(labelStoresMutex);
+        const auto low = labelStores.find(address);
+        if (low == labelStores.end()) return false;
+        const auto high = bytes == 8 ? labelStores.find(address + 4) : labelStores.end();
+        if (bytes == 8 && high == labelStores.end()) return false;
+        for (const auto& store : low->second) {
+            if (store.stamp <= received) continue;
+            std::uint64_t value = store.value;
+            if (bytes == 8) {
+                const auto upper = std::find_if(high->second.begin(), high->second.end(), [&](const LabelStore& other) { return other.stamp == store.stamp; });
+                if (upper == high->second.end()) continue;
+                value |= static_cast<std::uint64_t>(upper->value) << 32u;
+            }
+            if (Pm4::WaitComparesValue(packet, value)) return true;
+        }
+        return false;
+    }
+
     std::vector<std::shared_ptr<VulkanDevice>> replacedDevices;
     std::stop_token shutdownToken = LibcShutdownToken_nid_postfix();
     DeviceUseGate deviceReplacement;
@@ -1604,10 +1648,47 @@ private:
         return worker;
     }
 
+    void noteHeldAtSubmit(Submission& submission, std::size_t cursor) {
+        const auto packet = std::span<const std::uint32_t>(submission.commands).subspan(cursor, std::min<std::size_t>(Pm4::PacketWords(submission.commands[cursor]), submission.commands.size() - cursor));
+        const auto opcode = (packet[0] >> 8u) & 0xffu;
+        if ((packet[0] >> 30u) != 3u) return;
+        if (opcode == 0x49 || opcode == 0x37) {
+            if (const auto label = Pm4::DecodeLabelWrite(packet)) {
+                const auto bytes = label->Bytes();
+                if (label->address % 4 == 0 && bytes.size() <= 64) {
+                    for (std::size_t offset = 0; offset < bytes.size(); offset += 4) submission.labelWrites.push_back(label->address + offset);
+                }
+            }
+            return;
+        }
+        if ((opcode != 0x3c && opcode != 0x93) || packet.size() < 7 || ((packet[1] >> 4u) & 3u) != 1u) return;
+        const auto address = packet[2] | (static_cast<std::uint64_t>(packet[3]) << 32u);
+        const std::size_t bytes = Pm4::WaitAwaitedBytes(packet);
+        if (address % 4 != 0 || !GuestMemory::Accessible(reinterpret_cast<const void*>(address), bytes)) return;
+        const auto worker = workers.find(submission.queue);
+        for (std::size_t offset = 0; offset < bytes; offset += 4) {
+            const auto dword = address + offset;
+            if (std::find(submission.labelWrites.begin(), submission.labelWrites.end(), dword) != submission.labelWrites.end()) return;
+            if (worker != workers.end() && worker->second.unfinishedWrites.contains(dword)) return;
+        }
+        std::uint64_t value = *reinterpret_cast<const volatile std::uint32_t*>(address);
+        if (bytes == 8) value |= static_cast<std::uint64_t>(*reinterpret_cast<const volatile std::uint32_t*>(address + 4)) << 32u;
+        if (Pm4::WaitComparesValue(packet, value)) submission.heldAtSubmit.insert(cursor);
+    }
+
+    static void forgetUnfinishedWrites(QueueWorker& worker, const Submission& submission) {
+        for (const auto dword : submission.labelWrites) {
+            const auto found = worker.unfinishedWrites.find(dword);
+            if (found == worker.unfinishedWrites.end()) continue;
+            if (--found->second == 0) worker.unfinishedWrites.erase(found);
+        }
+    }
+
     // Caller holds `mutex`.
     void enqueue(Submission submission) {
         const auto queue = submission.queue;
         auto& worker = workers[queue];
+        for (const auto dword : submission.labelWrites) ++worker.unfinishedWrites[dword];
         worker.pending.push_back(std::move(submission));
         worker.queued.fetch_add(1, std::memory_order_acq_rel);
         if (!worker.thread.joinable()) worker.thread = std::thread([this, queue] { run(queue); });
@@ -1952,6 +2033,11 @@ private:
             // Debug aid (APS5_TRACE_DCC_KEYS=1): the title's fills of a surface's DCC metadata.
             static const bool traceKeys = std::getenv("APS5_TRACE_DCC_KEYS") != nullptr;
             if (traceKeys && coverage.cover == Graphics::StorageTexture::FillCover::Keys) std::fprintf(stderr, "[dcc-keys] title fills keys 0x%llx+0x%zx with %08x %08x %08x %08x (queue 0x%x)\n", static_cast<unsigned long long>(base), bytes, pattern[0], pattern[1], pattern[2], pattern[3], queueId);
+            const bool uniformKeysFill = coverage.cover == Graphics::StorageTexture::FillCover::Keys && std::all_of(pattern.begin(), pattern.end(), [&](std::uint32_t word) { return word == (pattern[0] & 0xffu) * 0x01010101u; });
+            if (uniformKeysFill) {
+                Graphics::StorageTexture::NoteKeysFill(base, bytes, static_cast<std::uint8_t>(pattern[0]));
+                Graphics::StorageTexture::ClearByKeysFill(base, bytes, static_cast<std::uint8_t>(pattern[0]));
+            }
             // Results pending in images wholly inside the range are dead whichever way the fill is
             // done (it overwrites every byte of them): dropped rather than stored first.
             const auto discarded = fillClearEnabled() ? Graphics::StorageTexture::DiscardPendingInside(base, bytes) : 0u;
@@ -1983,6 +2069,19 @@ private:
             phase(FillFlush);
             const bool stored = cleared || localDevice->FillBuffer(base, bytes, pattern);
             phase(FillDevice);
+            if (uniformKeysFill && stored && !cleared) {
+                Graphics::DccKeys filled = Graphics::DccKeys::Mixed;
+                switch (pattern[0] & 0xffu) {
+                    case 0x00: filled = Graphics::DccKeys::Clear0000; break;
+                    case 0x40: filled = Graphics::DccKeys::Clear0001; break;
+                    case 0x80: filled = Graphics::DccKeys::Clear1110; break;
+                    case 0xc0: filled = Graphics::DccKeys::Clear1111; break;
+                    case 0x20: filled = Graphics::DccKeys::ClearRegister; break;
+                    case 0xff: filled = Graphics::DccKeys::Uncompressed; break;
+                    default: break;
+                }
+                if (filled != Graphics::DccKeys::Mixed) Graphics::NoteKeysFillOnGpu(base, bytes, filled);
+            }
             if (profile && stored && !cleared) {
                 const bool uniform = pattern[0] == pattern[1] && pattern[1] == pattern[2] && pattern[2] == pattern[3];
                 ++(uniform ? uniformFills : patternFills);
@@ -4012,6 +4111,16 @@ private:
         };
         auto drawParameters = Pm4::ResolveDraw(packet, queue);
         if (!drawParameters.indirect && !drawParameters.indexed && (drawParameters.indexCount == 0 || drawParameters.instanceCount == 0)) return DrawVerdict::Nothing;
+        if (const auto pass = Graphics::DecodeColorMetadataPass(queue)) {
+            require(!drawParameters.indirect, "indirect CB metadata passes are unsupported");
+            GuestMemory::TagGpuLockSite(GuestMemory::GpuLockSite::Draw);
+            std::lock_guard gpuLock(GuestMemory::GpuMutex());
+            if (device == nullptr) device = std::make_shared<VulkanDevice>();
+            const std::shared_ptr<VulkanDevice> localDevice = device;
+            recordLabelsForPacket(localDevice.get(), submission.queue);
+            localDevice->ColorMetadataPass(*pass);
+            return DrawVerdict::Drawn;
+        }
         static const bool traceIndirect = std::getenv("APS5_TRACE_INDIRECT_DRAWS") != nullptr;
         if (traceIndirect && drawParameters.indirect) std::fprintf(stderr, "[draw] indirect packet %s args 0x%llx count %u reached\n", Pm4::Name(packet[0]).c_str(), static_cast<unsigned long long>(drawParameters.indirect->arguments), drawParameters.indirect->count);
         {
@@ -4165,17 +4274,17 @@ private:
             const auto initializeMerged = [&](DrawProgram& program, std::uint32_t pointerBase, bool pointerRequired) {
                 program.firstUserSgpr = 0;
                 program.userData.insert(program.userData.begin(), 8, 0);
-                if (pointerRequired) {
-                    Graphics::NoteRegisterRead(Graphics::RegisterBank::Shader, pointerBase);
-                    Graphics::NoteRegisterRead(Graphics::RegisterBank::Shader, pointerBase + 1);
-                    const auto low = readRegister(queue.shader, pointerBase);
-                    const auto high = readRegister(queue.shader, pointerBase + 1);
-                    const auto address = static_cast<std::uint64_t>(low) | (static_cast<std::uint64_t>(high) << 32u);
-                    require(address != 0, "merged shader user-data address is null");
-                    GuestMemory::CheckRange(reinterpret_cast<const void*>(address), 8, 4);
-                    program.userData[0] = low;
-                    program.userData[1] = high;
-                }
+                Graphics::NoteRegisterRead(Graphics::RegisterBank::Shader, pointerBase);
+                Graphics::NoteRegisterRead(Graphics::RegisterBank::Shader, pointerBase + 1);
+                if (!pointerRequired && !queue.shader.contains(pointerBase) && !queue.shader.contains(pointerBase + 1)) return;
+                const auto low = readRegister(queue.shader, pointerBase);
+                const auto high = readRegister(queue.shader, pointerBase + 1);
+                const auto address = static_cast<std::uint64_t>(low) | (static_cast<std::uint64_t>(high) << 32u);
+                require(address != 0 || !pointerRequired, "merged shader user-data address is null");
+                if (address == 0) return;
+                GuestMemory::CheckRange(reinterpret_cast<const void*>(address), 8, 4);
+                program.userData[0] = low;
+                program.userData[1] = high;
             };
             const auto& graphics = product->state;
             if (graphics.stages.path == Graphics::ShaderPath::Tessellation) {
@@ -4378,8 +4487,8 @@ private:
                 require(pixel.interpolatorCount <= pixel.interpolatorSettings.size(), "pixel stage info interpolator count exceeds its table");
                 mix(pixel.interpolatorCount);
                 for (std::uint32_t i = 0; i < pixel.interpolatorCount; ++i) mix(pixel.interpolatorSettings[i]);
-                mix(pixel.perspectiveCenterVgpr);
-                for (const bool flag : {pixel.wave32, pixel.hasPerspectiveCenterVgpr, pixel.posX, pixel.posY, pixel.posZ, pixel.posW, pixel.frontFace, pixel.ancillary, pixel.sampleShading, pixel.noPerspective, pixel.pixelKillEnable, pixel.depthExportEnable, pixel.sampleMaskExportEnable, pixel.earlyZ, pixel.executeOnNoop}) mix(flag);
+                mix(pixel.inputAddr);
+                for (const bool flag : {pixel.wave32, pixel.hasPerspectiveCenterVgpr, pixel.perspectiveCentroid, pixel.posX, pixel.posY, pixel.posZ, pixel.posW, pixel.frontFace, pixel.ancillary, pixel.sampleShading, pixel.noPerspective, pixel.linearCentroid, pixel.pixelKillEnable, pixel.depthExportEnable, pixel.sampleMaskExportEnable, pixel.earlyZ, pixel.executeOnNoop}) mix(flag);
                 for (const auto value : pixel.targetOutputMode) mix(value);
                 for (const auto value : pixel.targetExportMapping) mix(value);
                 std::lock_guard cacheLock(drawCacheMutex);
@@ -5160,12 +5269,15 @@ private:
         bool first = true;
         for (const auto& label : labels) {
             const auto bytes = std::span<const std::byte>(label.bytes).first(label.size);
-            const int reason = localDevice != nullptr ? localDevice->WriteLabelOnGpu(label.address, bytes, ++eventSerial, queue, first) : 4;
+            const auto stamp = ++eventSerial;
+            const int reason = localDevice != nullptr ? localDevice->WriteLabelOnGpu(label.address, bytes, stamp, queue, first) : 4;
             first = false;
             countLabelOutcome(reason);
-            if (reason == 0 || reason == 5 || reason == 6) continue;
-            if (reason != 1 && localDevice != nullptr) localDevice->WaitIdle();
-            GuestMemory::Write(label.address, bytes, 4);
+            if (reason != 0 && reason != 5 && reason != 6) {
+                if (reason != 1 && localDevice != nullptr) localDevice->WaitIdle();
+                GuestMemory::Write(label.address, bytes, 4);
+            }
+            noteLabelStore(label.address, bytes, stamp);
         }
         ++labelGroups;
         static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;
@@ -5430,7 +5542,7 @@ private:
     }
 
     // WAIT_REG_MEM: another queue or the CPU produces the value; the other queues run on their own threads.
-    void waitMemory(std::span<const std::uint32_t> packet, std::uint32_t queue, const PacketHistory& context, std::uint64_t received) {
+    void waitMemory(std::span<const std::uint32_t> packet, std::uint32_t queue, const PacketHistory& context, std::uint64_t received, bool heldAtSubmit) {
         // The timeout counts from the last sign of GPU progress: while any queue is executing packets,
         // the producer may still be on its way (shader compiles alone take hundreds of milliseconds).
         auto start = std::chrono::steady_clock::now();
@@ -5438,9 +5550,8 @@ private:
         // Names this worker's thread in the [lock] GpuMutex wait report.
         GuestMemory::TagGpuLockThread(queue);
         auto& outcomes = waitOutcomes();
-        const bool wide = ((packet[0] >> 8u) & 0xffu) == 0x93u;
         const std::uint64_t awaited = packet[2] | (static_cast<std::uint64_t>(packet[3]) << 32u);
-        const std::size_t awaitedBytes = wide ? 8 : 4;
+        const std::size_t awaitedBytes = Pm4::WaitAwaitedBytes(packet);
         static const bool traceGpu = std::getenv("APS5_TRACE_GPU") != nullptr;
         if (traceGpu) std::fprintf(stderr, "[gpu] %.1f queue 0x%x waits 0x%llx == 0x%x (now 0x%x)\n", TraceMs(), queue, static_cast<unsigned long long>(packet[2] | (static_cast<std::uint64_t>(packet[3]) << 32u)), packet[4],
                                    *reinterpret_cast<const volatile std::uint32_t*>(packet[2] | (static_cast<std::uint64_t>(packet[3]) << 32u)));
@@ -5469,6 +5580,7 @@ private:
             ++outcomes.atEntry;
             return;
         }
+        if (heldAtSubmit || storedSince(packet, awaited, awaitedBytes, received)) return;
         // Debug aids: APS5_NO_LABEL_SHORTCUT=1 never satisfies a wait from the pending-label table;
         // APS5_NO_WAIT_OVERLAP_SUBMIT=1 submits the open batch at every wait, as before, instead of
         // only when it writes the awaited range.
@@ -5714,6 +5826,7 @@ private:
         bool spinning = pauseSpin;
         std::uint32_t polls = 0;
         while (!Pm4::WaitSatisfiedUnchecked(packet)) {
+            if (storedSince(packet, awaited, awaitedBytes, received)) return;
             ++polls;
             if (spinning) {
                 _mm_pause();
@@ -5739,9 +5852,12 @@ private:
                 static std::uint64_t timeouts = 0;
                 if (++timeouts % 20 == 0) std::fprintf(stderr, "[gpu] %llu GPU waits have timed out\n", static_cast<unsigned long long>(timeouts));
                 if (!reported.insert(packet[2] | (static_cast<std::uint64_t>(packet[3]) << 32u)).second) return;
-                std::fprintf(stderr, "[gpu] queue 0x%x WAIT_REG_MEM at 0x%llx timed out after %dms (function %u ref 0x%x mask 0x%x value 0x%x)\n", queue,
-                             static_cast<unsigned long long>(packet[2] | (static_cast<std::uint64_t>(packet[3]) << 32u)), WaitTimeoutMs(), packet[1] & 7u, packet[4], packet[5],
-                             *reinterpret_cast<const volatile std::uint32_t*>(packet[2] | (static_cast<std::uint64_t>(packet[3]) << 32u)));
+                const bool wide = ((packet[0] >> 8u) & 0xffu) == 0x93u;
+                const std::uint64_t reference = wide ? packet[4] | (static_cast<std::uint64_t>(packet[5]) << 32u) : packet[4];
+                const std::uint64_t mask = wide ? packet[6] | (static_cast<std::uint64_t>(packet[7]) << 32u) : packet[5];
+                const std::uint64_t current = wide ? *reinterpret_cast<const volatile std::uint64_t*>(awaited) : *reinterpret_cast<const volatile std::uint32_t*>(awaited);
+                std::fprintf(stderr, "[gpu] queue 0x%x WAIT_REG_MEM%s at 0x%llx timed out after %dms (function %u ref 0x%llx mask 0x%llx value 0x%llx)\n", queue, wide ? "_64" : "",
+                             static_cast<unsigned long long>(awaited), WaitTimeoutMs(), packet[1] & 7u, static_cast<unsigned long long>(reference), static_cast<unsigned long long>(mask), static_cast<unsigned long long>(current));
                 const auto address = packet[2] | (static_cast<std::uint64_t>(packet[3]) << 32u);
                 for (const auto& record : writeHistory()) {
                     if (record.length != 0 && record.target <= address && address < record.target + std::max<std::uint64_t>(record.length, 4))
@@ -5990,7 +6106,8 @@ private:
                         // submission the game made before this point. Without a device (reason 4)
                         // the packet drains nothing and Pm4::Execute stores it, as before.
                         recordDeferredLabels(localDevice.get(), submission.queue);
-                        const auto reason = localDevice != nullptr ? localDevice->WriteLabelOnGpu(label->address, bytes, ++eventSerial, submission.queue) : 4;
+                        const auto stamp = ++eventSerial;
+                        const auto reason = localDevice != nullptr ? localDevice->WriteLabelOnGpu(label->address, bytes, stamp, submission.queue) : 4;
                         wroteOnGpu = reason == 0 || reason == 5 || reason == 6;
                         if (reason == 1) {
                             // Idle recorder: stored here, still under the mutex, as
@@ -6000,6 +6117,7 @@ private:
                             GuestMemory::Write(label->address, bytes, 4);
                             wroteOnGpu = true;
                         }
+                        if (wroteOnGpu) noteLabelStore(label->address, bytes, stamp);
                         Graphics::Recorder::CloseLabelGroup(GuestMemory::TrackerGeneration());
                         countLabelOutcome(reason);
                         ++immediateLabels;
@@ -6046,7 +6164,9 @@ private:
                         // Earlier labels of this queue go first (queue order); the stamp is taken
                         // under the mutex like a label's.
                         recordDeferredLabels(localDevice.get(), submission.queue);
-                        const auto reason = localDevice != nullptr ? localDevice->WriteLabelOnGpu(store->address, bytes, ++eventSerial, submission.queue) : 4;
+                        const auto stamp = ++eventSerial;
+                        const auto reason = localDevice != nullptr ? localDevice->WriteLabelOnGpu(store->address, bytes, stamp, submission.queue) : 4;
+                        if (reason == 0 || reason == 1 || reason == 5 || reason == 6) noteLabelStore(store->address, bytes, stamp);
                         if (reason == 0 || reason == 5 || reason == 6) {
                             if (reason == 0) ++storesOnGpu;
                             else ++storesBehindCompletions;
@@ -6186,7 +6306,7 @@ private:
             } else if (opcode == 0x3c || opcode == 0x93) {
                 static const bool traceGpu = std::getenv("APS5_TRACE_GPU") != nullptr;
                 const auto waitStart = std::chrono::steady_clock::now();
-                timed(&WorkerProfile::waitMs, [&] { waitMemory(packet, submission.queue, recent, submission.received); });
+                timed(&WorkerProfile::waitMs, [&] { waitMemory(packet, submission.queue, recent, submission.received, submission.heldAtSubmit.contains(cursor)); });
                 if (traceGpu && std::chrono::steady_clock::now() - waitStart > std::chrono::milliseconds(200)) {
                     // List the rest of the submission to show what the stalled queue would have done next.
                     for (std::size_t next = cursor + count, shown = 0; next < submission.commands.size() && shown < 48; ++shown) {
@@ -6257,7 +6377,12 @@ private:
             } else if (sampleDump) {
                 dumpSampleCounters(packet[2] | (static_cast<std::uint64_t>(packet[3]) << 32u));
             } else if (opcode != 0x42 && opcode != 0x46 && opcode != 0x58) {
-                if (!wroteOnGpu) Pm4::Execute(packet, queue);
+                if (!wroteOnGpu) {
+                    Pm4::Execute(packet, queue);
+                    if (opcode == 0x49 || opcode == 0x37) {
+                        if (const auto label = Pm4::DecodeLabelWrite(packet)) noteLabelStore(label->address, label->Bytes(), ++eventSerial);
+                    }
+                }
                 if (endOfPipeInterrupt) AgcDriverDeliverEopInterrupt(submission.queue);
             }
             if (drawPacket) Graphics::Recorder::CountRecordedWork();
@@ -6377,6 +6502,7 @@ private:
                     std::lock_guard lock(mutex);
                     rethrowFailure();
                     markCompleted(submission.serial);
+                    forgetUnfinishedWrites(workers.at(id), submission);
                     // Only WaitIdle waits for a completion (idle workers wait for work, notified at
                     // its enqueue): the notify is skipped while nobody is in it.
                     notify = idleWaiters != 0;

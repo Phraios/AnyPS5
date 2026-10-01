@@ -210,6 +210,19 @@ VkImageViewType ViewTypeFor(TextureDimension dimension, [[maybe_unused]] std::ui
 
 }
 
+namespace {
+
+void ChainMinLod(const Context& context, const GuestTextureResource& descriptor, VkImageViewCreateInfo& viewInfo, VkImageViewMinLodCreateInfoEXT& minLod) {
+    const auto clamp = EffectiveMinLod(descriptor);
+    if (clamp == 0.0f) return;
+    Require(context.imageViewMinLod, "guest texture descriptor uses a minimum LOD clamp, which needs VK_EXT_image_view_min_lod");
+    minLod.minLod = clamp;
+    minLod.pNext = viewInfo.pNext;
+    viewInfo.pNext = &minLod;
+}
+
+}
+
 Texture::Texture(const Context& context, TextureDetiler& detiler, const GuestTextureResource& descriptor, VkComponentMapping components, std::span<const std::byte> snapshot) : context(context) {
     static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;
     PhaseTimer timer;
@@ -403,7 +416,10 @@ Texture::Texture(const Context& context, TextureDetiler& detiler, const GuestTex
         viewInfo.format = vkFormat;
         viewInfo.components = components;
         viewInfo.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, descriptor.baseLevel, viewLevelCount, descriptor.baseArray, viewLayerCount};
+        VkImageViewMinLodCreateInfoEXT minLod{VK_STRUCTURE_TYPE_IMAGE_VIEW_MIN_LOD_CREATE_INFO_EXT};
+        ChainMinLod(context, descriptor, viewInfo, minLod);
         Check(context.Function<PFN_vkCreateImageView>("vkCreateImageView")(context.device, &viewInfo, nullptr, &view), "vkCreateImageView");
+        createFirstLayerView(descriptor, viewInfo);
         if (profile) {
             auto& totals = Profile();
             totals.view += timer.lap();
@@ -444,7 +460,10 @@ Texture::Texture(const Context& context, const std::shared_ptr<StorageTexture>& 
         viewInfo.format = vkFormat;
         viewInfo.components = components;
         viewInfo.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, descriptor.baseLevel, viewLevelCount, descriptor.baseArray, viewLayerCount};
+        VkImageViewMinLodCreateInfoEXT minLod{VK_STRUCTURE_TYPE_IMAGE_VIEW_MIN_LOD_CREATE_INFO_EXT};
+        ChainMinLod(context, descriptor, viewInfo, minLod);
         Check(context.Function<PFN_vkCreateImageView>("vkCreateImageView")(context.device, &viewInfo, nullptr, &view), "vkCreateImageView storage view");
+        createFirstLayerView(descriptor, viewInfo);
         if (profile) {
             auto& totals = Profile();
             totals.view += timer.lap();
@@ -472,10 +491,19 @@ Texture::~Texture() {
     release();
 }
 
+void Texture::createFirstLayerView(const GuestTextureResource& descriptor, VkImageViewCreateInfo viewInfo) {
+    if (descriptor.dimension != TextureDimension::k2DArray) return;
+    viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    viewInfo.subresourceRange.layerCount = 1;
+    Check(context.Function<PFN_vkCreateImageView>("vkCreateImageView")(context.device, &viewInfo, nullptr, &firstLayerView), "vkCreateImageView first layer");
+}
+
 void Texture::release() noexcept {
     upload.reset();
     if (view) context.Function<PFN_vkDestroyImageView>("vkDestroyImageView")(context.device, view, nullptr);
     view = VK_NULL_HANDLE;
+    if (firstLayerView) context.Function<PFN_vkDestroyImageView>("vkDestroyImageView")(context.device, firstLayerView, nullptr);
+    firstLayerView = VK_NULL_HANDLE;
     // The image and its memory go with the last holder: this texture, or the batch still uploading it.
     owned.reset();
     image = VK_NULL_HANDLE;
@@ -862,13 +890,14 @@ bool AdjacentGenerationEnabled() {
 
 }
 
-VkImageView StorageTexture::createView(std::uint32_t mip) const {
+VkImageView StorageTexture::createView(std::uint32_t mip, bool firstLayer) const {
     Require(mip < descriptor.mipCount, "storage texture mip level is outside the texture");
-    const auto viewLayerCount = geometry.imageLayers - descriptor.baseArray;
+    Require(!firstLayer || descriptor.dimension == TextureDimension::k2DArray, "a first-layer storage view needs a 2D array surface");
+    const auto viewLayerCount = firstLayer ? 1u : geometry.imageLayers - descriptor.baseArray;
     VkImageViewCreateInfo viewInfo{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
     viewInfo.image = image;
     // Storage views address one mip; cube faces are written as array layers.
-    viewInfo.viewType = descriptor.dimension == TextureDimension::k1D ? VK_IMAGE_VIEW_TYPE_1D : descriptor.dimension == TextureDimension::k2D ? VK_IMAGE_VIEW_TYPE_2D : descriptor.dimension == TextureDimension::k3D ? VK_IMAGE_VIEW_TYPE_3D : VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+    viewInfo.viewType = firstLayer ? VK_IMAGE_VIEW_TYPE_2D : descriptor.dimension == TextureDimension::k1D ? VK_IMAGE_VIEW_TYPE_1D : descriptor.dimension == TextureDimension::k2D ? VK_IMAGE_VIEW_TYPE_2D : descriptor.dimension == TextureDimension::k3D ? VK_IMAGE_VIEW_TYPE_3D : VK_IMAGE_VIEW_TYPE_2D_ARRAY;
     viewInfo.format = storageFormat;
     viewInfo.components = {VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY};
     viewInfo.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, mip, 1u, descriptor.baseArray, viewLayerCount};
@@ -903,6 +932,14 @@ VkImageView StorageTexture::View(std::uint32_t mip) {
     if (found != extraViews.end()) return found->second;
     const auto created = createView(mip);
     extraViews.emplace(mip, created);
+    return created;
+}
+
+VkImageView StorageTexture::FirstLayerView(std::uint32_t mip) {
+    const auto found = firstLayerViews.find(mip);
+    if (found != firstLayerViews.end()) return found->second;
+    const auto created = createView(mip, true);
+    firstLayerViews.emplace(mip, created);
     return created;
 }
 
@@ -1201,6 +1238,7 @@ void StorageTexture::upload(const std::vector<bool>* layers) {
         refreshGeneration();
     };
     uploadedKeys = ProvedClearKeys(descriptor, guestBytes, keyProof);
+    filledKeys = DccKeys::Uncompressed;
     VkClearColorValue clearValue{};
     if (IsDccClear(uploadedKeys) && ClearColorFor(storageFormat, uploadedKeys, clearValue)) {
         // A fast-cleared surface is cleared on the GPU; its texel memory is neither read nor filled.
@@ -2328,7 +2366,7 @@ StorageTexture::FillCoverage StorageTexture::ClassifyFill(std::uint64_t address,
     } else if (overlapping.empty()) {
         constexpr std::uint64_t keyBytes = 256;
         for (const auto* texture : live.textures) {
-            if (!texture->released && texture->descriptor.dccAddress == address && texture->guestBytes / keyBytes == bytes) coverage.cover = FillCover::Keys;
+            if (!texture->released && texture->descriptor.dccAddress == address && texture->guestBytes / keyBytes != 0 && bytes >= texture->guestBytes / keyBytes) coverage.cover = FillCover::Keys;
         }
     } else if (overlapping.size() > 1) {
         coverage.cover = FillCover::Several;
@@ -2356,6 +2394,123 @@ StorageTexture::FillCoverage StorageTexture::ClassifyFill(std::uint64_t address,
         std::fprintf(stderr, "\n");
     }
     return coverage;
+}
+
+std::size_t StorageTexture::NoteKeysFill(std::uint64_t address, std::size_t bytes, std::uint8_t key) {
+    static const bool refillDisabled = std::getenv("APS5_NO_KEYS_REFILL") != nullptr;
+    DccKeys keys = DccKeys::Mixed;
+    switch (key) {
+        case 0x00: keys = DccKeys::Clear0000; break;
+        case 0x40: keys = DccKeys::Clear0001; break;
+        case 0x80: keys = DccKeys::Clear1110; break;
+        case 0xc0: keys = DccKeys::Clear1111; break;
+        case 0x20: keys = DccKeys::ClearRegister; break;
+        case 0xff: keys = DccKeys::Uncompressed; break;
+        default: return 0;
+    }
+    constexpr std::uint64_t keyBytes = 256;
+    static const bool traceKeys = std::getenv("APS5_TRACE_DCC_KEYS") != nullptr;
+    auto& live = Live();
+    std::lock_guard lock(live.mutex);
+    std::size_t covered = 0;
+    for (auto* texture : live.textures) {
+        if (texture->released || texture->descriptor.dccAddress != address || texture->guestBytes / keyBytes == 0 || bytes < texture->guestBytes / keyBytes) continue;
+        texture->filledKeys = keys;
+        ++covered;
+        if (traceKeys && IsDccClear(keys)) std::fprintf(stderr, "[dcc-keys] %s key fill over 0x%llx+0x%llx (uploaded %s, dirty %d)\n", DccKeysName(keys), static_cast<unsigned long long>(texture->descriptor.baseAddress), static_cast<unsigned long long>(texture->guestBytes), DccKeysName(texture->uploadedKeys), texture->dirty ? 1 : 0);
+        if (refillDisabled || !IsDccClear(keys) || texture->uploadedKeys != keys) continue;
+        texture->uploadedKeys = DccKeys::Uncompressed;
+    }
+    return covered;
+}
+
+std::size_t StorageTexture::ClearByKeysFill(std::uint64_t address, std::size_t bytes, std::uint8_t key) {
+    static const bool enabled = [] { const char* text = std::getenv("APS5_KEYS_FILL_CLEAR"); return text != nullptr && std::strcmp(text, "1") == 0; }();
+    if (!enabled) return 0;
+    DccKeys keys = DccKeys::Mixed;
+    switch (key) {
+        case 0x00: keys = DccKeys::Clear0000; break;
+        case 0x40: keys = DccKeys::Clear0001; break;
+        case 0x80: keys = DccKeys::Clear1110; break;
+        case 0xc0: keys = DccKeys::Clear1111; break;
+        case 0x20: keys = DccKeys::ClearRegister; break;
+        default: return 0;
+    }
+    constexpr std::uint64_t keyBytes = 256;
+    std::vector<std::shared_ptr<StorageTexture>> covered;
+    {
+        auto& live = Live();
+        std::lock_guard lock(live.mutex);
+        for (auto* texture : live.textures) {
+            if (texture->released || texture->descriptor.dccAddress != address || texture->guestBytes / keyBytes == 0 || bytes < texture->guestBytes / keyBytes) continue;
+            if (auto shared = texture->weak_from_this().lock()) covered.push_back(std::move(shared));
+        }
+    }
+    std::size_t cleared = 0;
+    for (const auto& texture : covered) {
+        if (texture->clearByKeysFill(keys, key)) ++cleared;
+    }
+    return cleared;
+}
+
+bool StorageTexture::clearByKeysFill(DccKeys keys, std::uint8_t key) {
+    static const bool traceKeys = std::getenv("APS5_TRACE_DCC_KEYS") != nullptr;
+    VkClearColorValue clearValue{};
+    auto* recorder = Recorder::Active();
+    const char* refusal = !ClearColorFor(storageFormat, keys, clearValue) ? (keys == DccKeys::ClearRegister ? "clear-register code" : "no clear value in the storage format") : recorder == nullptr ? "no recorder" : nullptr;
+    if (refusal != nullptr) {
+        static std::atomic<bool> reported{false};
+        if (!reported.exchange(true)) std::fprintf(stderr, "[dcc-keys] key fill 0x%02x (%s) over surface 0x%llx+0x%llx (guest format %u, vk format %d, keys 0x%llx) not applied at once: %s\n", key, DccKeysName(keys), static_cast<unsigned long long>(descriptor.baseAddress), static_cast<unsigned long long>(guestBytes), descriptor.format, static_cast<int>(storageFormat), static_cast<unsigned long long>(descriptor.dccAddress), refusal);
+        return false;
+    }
+    std::size_t droppedUnits = 0;
+    const bool wasDirty = dirty;
+    {
+        auto& pending = Pending();
+        std::lock_guard lock(pending.mutex);
+        droppedUnits = static_cast<std::size_t>(std::count(layerPending.begin(), layerPending.end(), true));
+        layerPending.assign(trackedLayers, false);
+        if (dirty) {
+            dirty = false;
+            std::erase(pending.textures, this);
+            BumpPendingSerial();
+        }
+    }
+    const auto commands = recorder->Commands();
+    const auto timing = recorder->BeginGpuTiming(Recorder::CommandClass::DccClear);
+    if (auto self = weak_from_this().lock()) recorder->Keep(std::move(self));
+    Recorder::CountBarriers(Recorder::CommandClass::DccClear, 2);
+    if (Recorder::BarrierValidate()) {
+        const std::pair<VkImage, bool> clearedImage{image, true};
+        recorder->NoteAccess(Recorder::CommandClass::DccClear, Recorder::Access{{}, {}, std::span(&clearedImage, 1), VK_PIPELINE_STAGE_TRANSFER_BIT});
+    }
+    VkImageMemoryBarrier toClear{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+    toClear.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    toClear.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    toClear.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    toClear.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    toClear.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    toClear.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    toClear.image = image;
+    toClear.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, descriptor.mipCount, 0, geometry.imageLayers};
+    context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier")(commands, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &toClear);
+    context.Function<PFN_vkCmdClearColorImage>("vkCmdClearColorImage")(commands, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clearValue, 1, &toClear.subresourceRange);
+    VkImageMemoryBarrier toGeneral = toClear;
+    toGeneral.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    toGeneral.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    toGeneral.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    toGeneral.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+    context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier")(commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0, nullptr, 1, &toGeneral);
+    recorder->EndGpuTiming(timing, guestBytes);
+    originalValid = false;
+    uploadedKeys = keys;
+    keyProof = {};
+    forgetBorrowed(0, trackedLayers);
+    layerGeneration.assign(trackedLayers, GuestMemory::CollectWrites(descriptor.baseAddress, static_cast<std::size_t>(guestBytes)));
+    refreshGeneration();
+    ++version;
+    if (traceKeys) std::fprintf(stderr, "[dcc-keys] key fill %s clears 0x%llx+0x%llx at once (keys 0x%llx, %zu pending units dropped, dirty %d)\n", DccKeysName(keys), static_cast<unsigned long long>(descriptor.baseAddress), static_cast<unsigned long long>(guestBytes), static_cast<unsigned long long>(descriptor.dccAddress), droppedUnits, wasDirty ? 1 : 0);
+    return true;
 }
 
 bool StorageTexture::FillClear(std::span<const std::uint32_t, 4> pattern, std::uint32_t layer, const char*& refusal) {
@@ -2960,7 +3115,7 @@ void StorageTexture::writeBackLayers(const std::vector<bool>& layers) {
             if (profile) Profile().storageGpu += timer.lap();
             originalValid = false;
             traceKeyStore("block write-back", descriptor, guestBytes);
-            MarkDccUncompressed(context, descriptor.dccAddress, guestBytes);
+            if (!IsDccClear(filledKeys)) MarkDccUncompressed(context, descriptor.dccAddress, guestBytes);
             uploadedKeys = DccKeys::Uncompressed;
             for (const auto& [from, to] : keep) GuestMemory::MarkWritten(from, static_cast<std::size_t>(to - from));
             settle(true);
@@ -3055,7 +3210,7 @@ void StorageTexture::writeBackLayers(const std::vector<bool>& layers) {
         // metadata is host-imported (no CPU wait for the title's key-writing kernels), else a CPU
         // store (APS5_CPU_DCC_KEYS=1 keeps the CPU store; see DccMetadata.hpp).
         traceKeyStore("layer write-back", descriptor, guestBytes);
-        MarkDccUncompressed(context, descriptor.dccAddress, guestBytes);
+        if (!IsDccClear(filledKeys)) MarkDccUncompressed(context, descriptor.dccAddress, guestBytes);
         uploadedKeys = DccKeys::Uncompressed;
         for (const auto& [from, to] : keep) GuestMemory::MarkWritten(from, static_cast<std::size_t>(to - from));
         // The walk covers this surface's pages only: an adjacent image's later CPU write is stamped
@@ -3163,7 +3318,7 @@ void StorageTexture::writeBackLayers(const std::vector<bool>& layers) {
     // The texels now hold the whole image, so later reads must see them rather than a fast clear
     // (the keys may be host-imported although the texels were not: then a recorded fill, else a CPU store).
     traceKeyStore("cpu write-back", descriptor, guestBytes);
-    MarkDccUncompressed(context, descriptor.dccAddress, guestBytes);
+    if (!IsDccClear(filledKeys)) MarkDccUncompressed(context, descriptor.dccAddress, guestBytes);
     uploadedKeys = DccKeys::Uncompressed;
     // The store above is the only write to these pages, so `original` is current at a fresh
     // generation, unless blocks were kept for the CPU: then the image is stale there.
@@ -3200,6 +3355,8 @@ StorageTexture::~StorageTexture() {
 void StorageTexture::release() noexcept {
     for (const auto& [mip, extra] : extraViews) context.Function<PFN_vkDestroyImageView>("vkDestroyImageView")(context.device, extra, nullptr);
     extraViews.clear();
+    for (const auto& [mip, extra] : firstLayerViews) context.Function<PFN_vkDestroyImageView>("vkDestroyImageView")(context.device, extra, nullptr);
+    firstLayerViews.clear();
     for (const auto& [format, attachment] : attachmentViews) context.Function<PFN_vkDestroyImageView>("vkDestroyImageView")(context.device, attachment, nullptr);
     attachmentViews.clear();
     if (view) context.Function<PFN_vkDestroyImageView>("vkDestroyImageView")(context.device, view, nullptr);

@@ -75,6 +75,8 @@ void CountDrawSkip(DrawSkip kind, double us);
 // waited for at once. Read and written under GuestMemory::GpuMutex, like the device's list.
 std::shared_ptr<std::vector<std::shared_ptr<ShaderResources>>> DrawCopiedWriters();
 
+void RunColorMetadataPass(const Context& context, const ColorMetadataPass& pass);
+
 }
 
 #endif

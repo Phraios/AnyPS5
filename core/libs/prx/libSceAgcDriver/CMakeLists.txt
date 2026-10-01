@@ -181,6 +181,14 @@ target_link_libraries(agc_shader_disk_cache_tests PRIVATE shader_recompiler_agc_
 set_target_properties(agc_shader_disk_cache_tests PROPERTIES CXX_EXTENSIONS OFF)
 configure_windows_unwind(agc_shader_disk_cache_tests)
 
+add_executable(agc_shader_control_flow_tests EXCLUDE_FROM_ALL
+        tests/ControlFlow.cpp
+)
+target_include_directories(agc_shader_control_flow_tests PRIVATE ${LIBS_INCLUDE_DIR})
+target_link_libraries(agc_shader_control_flow_tests PRIVATE shader_recompiler_agc_driver libc)
+set_target_properties(agc_shader_control_flow_tests PROPERTIES CXX_EXTENSIONS OFF)
+configure_windows_unwind(agc_shader_control_flow_tests)
+
 add_executable(agc_driver_flip_tests EXCLUDE_FROM_ALL
         tests/Flip.cpp
 )
@@ -197,12 +205,28 @@ target_link_libraries(agc_driver_flip_tests PRIVATE
 set_target_properties(agc_driver_flip_tests PROPERTIES CXX_EXTENSIONS OFF)
 configure_windows_unwind(agc_driver_flip_tests)
 
+set(agcSampleLodShaderSource ${CMAKE_CURRENT_SOURCE_DIR}/tests/shaders/SampleLod.comp)
+set(agcTestShaderGeneratedRoot ${CMAKE_CURRENT_BINARY_DIR}/generated-tests)
+set(agcSampleLodShaderSpv ${agcTestShaderGeneratedRoot}/SampleLod.spv)
+set(agcSampleLodShaderHeader ${agcTestShaderGeneratedRoot}/SampleLod_spv.h)
+add_custom_command(
+        OUTPUT "${agcSampleLodShaderHeader}"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${agcTestShaderGeneratedRoot}"
+        COMMAND "$<TARGET_FILE:glslang-standalone>" -V --target-env vulkan1.1 -o "${agcSampleLodShaderSpv}" "${agcSampleLodShaderSource}"
+        COMMAND ${CMAKE_COMMAND} -DINPUT=${agcSampleLodShaderSpv} -DOUTPUT=${agcSampleLodShaderHeader}
+        -DSYMBOL=SAMPLE_LOD_SPV -P "${CMAKE_CURRENT_SOURCE_DIR}/embed_spirv.cmake"
+        DEPENDS "${agcSampleLodShaderSource}" glslang-standalone
+        VERBATIM
+)
+
 add_executable(agc_driver_recorder_tests EXCLUDE_FROM_ALL
         tests/Recorder.cpp
+        ${agcSampleLodShaderHeader}
 )
 
 target_include_directories(agc_driver_recorder_tests PRIVATE
         ${LIBS_INCLUDE_DIR}
+        ${agcTestShaderGeneratedRoot}
         ${CMAKE_SOURCE_DIR}/core/shader/recompiler
         ${CMAKE_SOURCE_DIR}/3rdparty/Vulkan-Headers/include
 )
@@ -323,8 +347,20 @@ target_link_libraries(agc_driver_mesh_tests PRIVATE shader_recompiler_agc_driver
 set_target_properties(agc_driver_mesh_tests PROPERTIES CXX_EXTENSIONS OFF)
 configure_windows_unwind(agc_driver_mesh_tests)
 
+add_executable(agc_driver_mix_precision_tests EXCLUDE_FROM_ALL
+        tests/MixPrecision.cpp
+)
+target_include_directories(agc_driver_mix_precision_tests PRIVATE
+        ${LIBS_INCLUDE_DIR}
+        ${CMAKE_SOURCE_DIR}/core/shader/recompiler
+        ${CMAKE_SOURCE_DIR}/3rdparty/Vulkan-Headers/include
+)
+target_link_libraries(agc_driver_mix_precision_tests PRIVATE libSceAgcDriver SDL2-static libc)
+set_target_properties(agc_driver_mix_precision_tests PROPERTIES CXX_EXTENSIONS OFF)
+configure_windows_unwind(agc_driver_mix_precision_tests)
+
 if(BUILD_TESTING)
-    foreach(agcTest IN ITEMS agc_driver_tests agc_shader_memory_tests agc_structurizer_tests agc_dpp_write_tests agc_shader_disk_cache_tests agc_driver_flip_tests agc_driver_pm4_tests agc_driver_graphics_tests)
+    foreach(agcTest IN ITEMS agc_driver_tests agc_shader_memory_tests agc_structurizer_tests agc_dpp_write_tests agc_shader_disk_cache_tests agc_shader_control_flow_tests agc_driver_flip_tests agc_driver_pm4_tests agc_driver_graphics_tests)
         string(REGEX REPLACE "_tests$" "" agcTestName "${agcTest}")
         set_target_properties(${agcTest} PROPERTIES EXCLUDE_FROM_ALL OFF)
         add_test(NAME ${agcTestName} COMMAND ${agcTest})
