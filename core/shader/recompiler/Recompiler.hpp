@@ -189,6 +189,7 @@ struct SpirvTarget {
     std::uint32_t maxWorkgroupSharedMemoryBytes;
     std::optional<MeshTargetLimits> mesh;
     std::optional<TessellationTargetLimits> tessellation;
+    bool nonConstantImageOffsets = false;
 };
 
 struct BindingLayout {
@@ -329,6 +330,7 @@ struct FragmentParameter {
     std::uint32_t sourceLocation;
     bool flat;
     bool perVertex;
+    bool custom = false;
 };
 
 // Compiled SPIR-V shared between a cached variant and every result materialized from it: results
