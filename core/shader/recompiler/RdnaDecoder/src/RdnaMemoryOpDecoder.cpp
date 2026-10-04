@@ -113,6 +113,23 @@ constexpr MemoryOpcodeInfo mubufOpcodes[] = {
     {0x40u, RdnaOpcode::BufferAtomicFmax, 1, 32, false, false, false},
     {0x50u, RdnaOpcode::BufferAtomicSwapX2, 2, 32, false, false, false},
     {0x5au, RdnaOpcode::BufferAtomicOrX2, 2, 32, false, false, false},
+    {0x3cu, RdnaOpcode::BufferAtomicInc, 1, 32, false, false, false},
+    {0x3du, RdnaOpcode::BufferAtomicDec, 1, 32, false, false, false},
+    {0x51u, RdnaOpcode::BufferAtomicCmpswapX2, 2, 32, false, false, false},
+    {0x52u, RdnaOpcode::BufferAtomicAddX2, 2, 32, false, false, false},
+    {0x53u, RdnaOpcode::BufferAtomicSubX2, 2, 32, false, false, false},
+    {0x55u, RdnaOpcode::BufferAtomicSminX2, 2, 32, false, false, false},
+    {0x56u, RdnaOpcode::BufferAtomicUminX2, 2, 32, false, false, false},
+    {0x57u, RdnaOpcode::BufferAtomicSmaxX2, 2, 32, false, false, false},
+    {0x58u, RdnaOpcode::BufferAtomicUmaxX2, 2, 32, false, false, false},
+    {0x59u, RdnaOpcode::BufferAtomicAndX2, 2, 32, false, false, false},
+    {0x5bu, RdnaOpcode::BufferAtomicXorX2, 2, 32, false, false, false},
+    {0x3eu, RdnaOpcode::BufferAtomicFcmpswap, 1, 32, false, false, false},
+    {0x5cu, RdnaOpcode::BufferAtomicIncX2, 2, 32, false, false, false},
+    {0x5du, RdnaOpcode::BufferAtomicDecX2, 2, 32, false, false, false},
+    {0x5eu, RdnaOpcode::BufferAtomicFcmpswapX2, 2, 32, false, false, false},
+    {0x5fu, RdnaOpcode::BufferAtomicFminX2, 2, 32, false, false, false},
+    {0x60u, RdnaOpcode::BufferAtomicFmaxX2, 2, 32, false, false, false},
     {0x80u, RdnaOpcode::BufferLoadFormatD16X, 1, 32, false, false, true},
     {0x81u, RdnaOpcode::BufferLoadFormatD16Xy, 2, 32, false, false, true},
     {0x82u, RdnaOpcode::BufferLoadFormatD16Xyz, 3, 32, false, false, true},
@@ -151,6 +168,7 @@ constexpr MemoryOpcodeInfo flatOpcodes[] = {
     {0x0du, RdnaOpcode::FlatLoadDwordx2, 2, 32, false, false, false},
     {0x0eu, RdnaOpcode::FlatLoadDwordx4, 4, 32, false, false, false},
     {0x0fu, RdnaOpcode::FlatLoadDwordx3, 3, 32, false, false, false},
+    {0x16u, RdnaOpcode::GlobalLoadDwordAddtid, 1, 32, false, false, false},
     {0x18u, RdnaOpcode::FlatStoreByte, 1, 8, false, false, false},
     {0x1au, RdnaOpcode::FlatStoreShort, 1, 16, false, false, false},
     {0x1cu, RdnaOpcode::FlatStoreDword, 1, 32, false, false, false},
@@ -665,6 +683,14 @@ RdnaInstruction DecodeRdnaFlat(std::uint32_t programCounter, std::span<const std
     setRawWords(instruction, code, wordIndex, 2u);
 
     instruction.destination = d16Half(vectorRegister(isFlatStoreOpcode(instruction.op) ? data : vdst), instruction.op);
+    if (instruction.op == RdnaOpcode::GlobalLoadDwordAddtid) {
+        if (seg != 2u) {
+            throw std::runtime_error("global_load_dword_addtid is available only in the global segment");
+        }
+        instruction.source0 = scalarDescriptorBase(saddr, 2u, "global_load_dword_addtid supports only an SGPR pair as base address");
+        instruction.sourceCount = 1;
+        return instruction;
+    }
     instruction.source0 = vectorRegister(addr);
     if (seg == 0u || saddr == 0x7Du || saddr == 0x7Fu) {
         if (addr == 255u) {

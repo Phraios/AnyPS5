@@ -19,6 +19,7 @@ bool IsScalarAluOpcode(RdnaOpcode opcode) {
         case RdnaOpcode::SMovB32:
         case RdnaOpcode::SMovB64:
         case RdnaOpcode::SMovkI32:
+        case RdnaOpcode::SCmovkI32:
         case RdnaOpcode::SAddI32:
         case RdnaOpcode::SAddU32:
         case RdnaOpcode::SSubI32:
@@ -358,6 +359,9 @@ bool IsVectorAluOpcode(RdnaOpcode opcode) {
         case RdnaOpcode::VFrexpExpI32F64:
         case RdnaOpcode::VFrexpMantF64:
         case RdnaOpcode::VFractF64:
+        case RdnaOpcode::VDivScaleF32:
+        case RdnaOpcode::VDivFmasF32:
+        case RdnaOpcode::VDivFixupF32:
         case RdnaOpcode::VCvtPknormI16F32:
         case RdnaOpcode::VCvtPknormU16F32:
         case RdnaOpcode::VCvtPkU16U32:
@@ -688,6 +692,23 @@ bool IsBufferMemoryOpcode(RdnaOpcode opcode) {
         case RdnaOpcode::BufferAtomicAnd:
         case RdnaOpcode::BufferAtomicOr:
         case RdnaOpcode::BufferAtomicOrX2:
+        case RdnaOpcode::BufferAtomicInc:
+        case RdnaOpcode::BufferAtomicDec:
+        case RdnaOpcode::BufferAtomicCmpswapX2:
+        case RdnaOpcode::BufferAtomicAddX2:
+        case RdnaOpcode::BufferAtomicSubX2:
+        case RdnaOpcode::BufferAtomicSminX2:
+        case RdnaOpcode::BufferAtomicUminX2:
+        case RdnaOpcode::BufferAtomicSmaxX2:
+        case RdnaOpcode::BufferAtomicUmaxX2:
+        case RdnaOpcode::BufferAtomicAndX2:
+        case RdnaOpcode::BufferAtomicXorX2:
+        case RdnaOpcode::BufferAtomicFcmpswap:
+        case RdnaOpcode::BufferAtomicFcmpswapX2:
+        case RdnaOpcode::BufferAtomicFminX2:
+        case RdnaOpcode::BufferAtomicFmaxX2:
+        case RdnaOpcode::BufferAtomicIncX2:
+        case RdnaOpcode::BufferAtomicDecX2:
         case RdnaOpcode::BufferAtomicXor:
         case RdnaOpcode::BufferAtomicFmin:
         case RdnaOpcode::BufferAtomicFmax:
@@ -758,7 +779,13 @@ bool IsImageOpcode(RdnaOpcode opcode) {
         case RdnaOpcode::ImageGetResinfo:
         case RdnaOpcode::ImageGetLod:
         case RdnaOpcode::ImageLoadMip:
+        case RdnaOpcode::ImageLoadPck:
+        case RdnaOpcode::ImageLoadPckSgn:
+        case RdnaOpcode::ImageLoadMipPck:
+        case RdnaOpcode::ImageLoadMipPckSgn:
         case RdnaOpcode::ImageStoreMip:
+        case RdnaOpcode::ImageStorePck:
+        case RdnaOpcode::ImageStoreMipPck:
         case RdnaOpcode::ImageAtomicSwap:
         case RdnaOpcode::ImageAtomicAdd:
         case RdnaOpcode::ImageAtomicUmin:
@@ -772,6 +799,9 @@ bool IsImageOpcode(RdnaOpcode opcode) {
         case RdnaOpcode::ImageAtomicSmax:
         case RdnaOpcode::ImageAtomicInc:
         case RdnaOpcode::ImageAtomicDec:
+        case RdnaOpcode::ImageAtomicFcmpswap:
+        case RdnaOpcode::ImageAtomicFmin:
+        case RdnaOpcode::ImageAtomicFmax:
         case RdnaOpcode::ImageGather4Lz:
         case RdnaOpcode::ImageGather4C:
         case RdnaOpcode::ImageGather4CLz:

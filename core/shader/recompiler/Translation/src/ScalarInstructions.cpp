@@ -1,6 +1,7 @@
 #include "Translation/ScalarInstructions.hpp"
 #include "Translation/TranslationContext.hpp"
 #include <stdexcept>
+#include <string>
 
 namespace ShaderRecompiler {
 
@@ -51,8 +52,25 @@ bool TranslationContext::emitScalar(const RdnaInstruction& inst) {
         scalarSelect64(inst, inst.destination);
         return true;
     case RdnaOpcode::SSetregB32:
+    case RdnaOpcode::SVersion:
         emitControlNop();
         return true;
+    case RdnaOpcode::SSetregImm32B32: {
+        const std::uint32_t field = inst.source1.value;
+        const std::uint32_t offset = (field >> 6u) & 0x1fu;
+        const std::uint32_t size = ((field >> 11u) & 0x1fu) + 1u;
+        const std::uint64_t written = static_cast<std::uint64_t>(inst.source0.value) & ((std::uint64_t{1} << size) - 1u);
+        if ((field & 0x3fu) != 1u || offset + size > 4u || written != 0u) {
+            throw std::runtime_error("s_setreg_imm32_b32 at pc " + std::to_string(inst.programCounter) + " writes a hardware register field other than round to nearest even in MODE");
+        }
+        emitControlNop();
+        return true;
+    }
+    case RdnaOpcode::SCmovkI32: {
+        const IrU32 previous = readU32(inst.destination);
+        writeRawU32(inst.destination, IrU32(ir.Select(ir.GetScc(), ir.Constant(inst.source0.value), previous.Value())));
+        return true;
+    }
     case RdnaOpcode::SWaitcnt:
         emitWaitcnt();
         return true;
@@ -379,6 +397,8 @@ bool TranslationContext::emitScalar(const RdnaInstruction& inst) {
     case RdnaOpcode::SDecperflevel:
         emitControlNop();
         return true;
+    case RdnaOpcode::SDenormMode:
+        throw std::runtime_error("s_denorm_mode " + std::to_string(inst.source0.value) + " at pc " + std::to_string(inst.programCounter) + ": the recompiler does not model denormal modes");
     case RdnaOpcode::SWaitcntDepctr:
     case RdnaOpcode::SWaitIdle:
         emitWaitcnt();

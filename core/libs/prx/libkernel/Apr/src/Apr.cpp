@@ -194,6 +194,9 @@ void _execute(const Apr::CommandBufferObject& buffer) {
         if (header.bytes < sizeof(header) || cursor + header.bytes > buffer.offset) throw std::runtime_error("APR: malformed command");
         switch (header.opcode) {
         case Apr::Opcode::Nop:
+        case Apr::Opcode::PushMarker:
+        case Apr::Opcode::PopMarker:
+        case Apr::Opcode::SetMarker:
             break;
         case Apr::Opcode::ReadFile: {
             Apr::ReadFileCommand command;

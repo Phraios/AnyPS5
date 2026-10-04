@@ -765,13 +765,15 @@ bool TranslationContext::emitVector(const RdnaInstruction& inst) {
     case RdnaOpcode::VPkMadU16:
         return packedInteger16Mad(inst, false);
     case RdnaOpcode::VPkMulLoU16:
-        return packedInteger16Binary(inst, IrOpcode::IMul32);
+        return packedInteger16Binary(inst, IrOpcode::IMul32, false);
     case RdnaOpcode::VPkAddI16:
+        return packedInteger16Binary(inst, IrOpcode::IAdd32, true);
     case RdnaOpcode::VPkAddU16:
-        return packedInteger16Binary(inst, IrOpcode::IAdd32);
+        return packedInteger16Binary(inst, IrOpcode::IAdd32, false);
     case RdnaOpcode::VPkSubI16:
+        return packedInteger16Binary(inst, IrOpcode::ISub32, true);
     case RdnaOpcode::VPkSubU16:
-        return packedInteger16Binary(inst, IrOpcode::ISub32);
+        return packedInteger16Binary(inst, IrOpcode::ISub32, false);
     case RdnaOpcode::VPkMaxI16:
         return packedInteger16MinMax(inst, IrOpcode::SMax32, true);
     case RdnaOpcode::VPkMinI16:
@@ -924,6 +926,12 @@ bool TranslationContext::emitVector(const RdnaInstruction& inst) {
         return floatBinary(inst, IrOpcode::FPMin32, false);
     case RdnaOpcode::VMaxF32:
         return floatBinary(inst, IrOpcode::FPMax32, false);
+    case RdnaOpcode::VDivScaleF32:
+        return vDivScaleF32(inst);
+    case RdnaOpcode::VDivFmasF32:
+        return vDivFmasF32(inst);
+    case RdnaOpcode::VDivFixupF32:
+        return vDivFixupF32(inst);
     case RdnaOpcode::VLdexpF32:
         return floatBinary(inst, IrOpcode::FPLdexp, false);
     case RdnaOpcode::VMacF32:

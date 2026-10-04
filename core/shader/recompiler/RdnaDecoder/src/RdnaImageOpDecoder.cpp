@@ -95,10 +95,19 @@ constexpr ImageOpcodeInfo imageOpcodes[] = {
     {0x16u, RdnaOpcode::ImageAtomicSmax, nullptr, 0, false, false, true},
     {0x1bu, RdnaOpcode::ImageAtomicInc, nullptr, 0, false, false, true},
     {0x1cu, RdnaOpcode::ImageAtomicDec, nullptr, 0, false, false, true},
+    {0x1du, RdnaOpcode::ImageAtomicFcmpswap, nullptr, 0, false, false, true},
+    {0x1eu, RdnaOpcode::ImageAtomicFmin, nullptr, 0, false, false, true},
+    {0x1fu, RdnaOpcode::ImageAtomicFmax, nullptr, 0, false, false, true},
     {0x00u, RdnaOpcode::ImageLoad, nullptr, 0, false, false, false},
     {0x01u, RdnaOpcode::ImageLoadMip, nullptr, 0, false, false, false},
+    {0x02u, RdnaOpcode::ImageLoadPck, nullptr, 0, false, false, false},
+    {0x03u, RdnaOpcode::ImageLoadPckSgn, nullptr, 0, false, false, false},
+    {0x04u, RdnaOpcode::ImageLoadMipPck, nullptr, 0, false, false, false},
+    {0x05u, RdnaOpcode::ImageLoadMipPckSgn, nullptr, 0, false, false, false},
     {0x08u, RdnaOpcode::ImageStore, nullptr, 0, false, false, false},
     {0x09u, RdnaOpcode::ImageStoreMip, nullptr, 0, false, false, false},
+    {0x0au, RdnaOpcode::ImageStorePck, nullptr, 0, false, false, false},
+    {0x0bu, RdnaOpcode::ImageStoreMipPck, nullptr, 0, false, false, false},
     {0x0eu, RdnaOpcode::ImageGetResinfo, nullptr, 0, false, false, false},
     {0x60u, RdnaOpcode::ImageGetLod, nullptr, 0, false, false, false},
     {0xe6u, RdnaOpcode::ImageBvhIntersectRay, "image_bvh_intersect_ray", 0, false, false, false},
@@ -262,7 +271,7 @@ RdnaInstruction DecodeRdnaMimg(std::uint32_t programCounter, std::span<const std
     }
     const auto opcode = ((word0 >> 18u) & 0x7Fu) | ((word0 & 1u) << 7u);
     const auto& info = lookupOpcode(opcode);
-    const auto reservedWord0 = info.sample || info.gather ? 0x000350C0u : 0x000340C0u;
+    const auto reservedWord0 = info.sample || info.gather ? 0x00035040u : info.atomic ? 0x000340C0u : 0x00034040u;
     if ((word0 & reservedWord0) != 0u || (word1 & 0x3C000000u) != 0u) {
         char message[96];
         std::snprintf(message, sizeof(message), "unsupported or reserved MIMG control bits (words %08x %08x)", word0, word1);
@@ -282,11 +291,11 @@ RdnaInstruction DecodeRdnaMimg(std::uint32_t programCounter, std::span<const std
     validateFlags(flags);
     const auto dimension = decodeDimension((word0 >> 3u) & 7u);
     const bool multisampled = dimension == RdnaImageDimension::Dim2DMsaa || dimension == RdnaImageDimension::Dim2DMsaaArray;
-    if (multisampled && (info.sample || info.gather || opcode == 0x60u || opcode == 1u || opcode == 9u)) {
+    if (multisampled && (info.sample || info.gather || opcode == 0x60u || (opcode >= 1u && opcode <= 5u) || opcode == 9u || opcode == 0x0bu)) {
         throw std::runtime_error("unsupported multisampled MIMG operation");
     }
     const auto dmask = (word0 >> 8u) & 15u;
-    const bool compareSwap = info.opcode == RdnaOpcode::ImageAtomicCmpswap;
+    const bool compareSwap = info.opcode == RdnaOpcode::ImageAtomicCmpswap || info.opcode == RdnaOpcode::ImageAtomicFcmpswap;
     if (dmask == 0u || (compareSwap ? dmask != 3u : (info.gather || info.atomic) && !std::has_single_bit(dmask))) {
         throw std::runtime_error("invalid MIMG data mask");
     }
@@ -295,7 +304,7 @@ RdnaInstruction DecodeRdnaMimg(std::uint32_t programCounter, std::span<const std
     }
     const bool rayQuery = info.opcode == RdnaOpcode::ImageBvhIntersectRay;
     std::uint32_t components = rayQuery ? (a16 ? 8u : 11u) : opcode == 0x0Eu ? 1u : coordinateCount(dimension);
-    if (opcode == 1u || opcode == 9u) {
+    if (opcode == 1u || opcode == 4u || opcode == 5u || opcode == 9u || opcode == 0x0bu) {
         ++components;
     }
     if (info.sample || info.gather) {
@@ -338,6 +347,7 @@ RdnaInstruction DecodeRdnaMimg(std::uint32_t programCounter, std::span<const std
     instruction.dataDwordCount = dataDwords;
     instruction.glc = (word0 & 0x2000u) != 0u;
     instruction.slc = (word0 & 0x02000000u) != 0u;
+    instruction.dlc = (word0 & 0x80u) != 0u;
     instruction.imageGlc = instruction.glc;
     instruction.imageSlc = instruction.slc;
     instruction.imageA16 = a16;

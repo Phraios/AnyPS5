@@ -84,11 +84,19 @@ bool TranslationContext::packedInteger16Shift(const RdnaInstruction& inst, IrOpc
     return true;
 }
 
-bool TranslationContext::packedInteger16Binary(const RdnaInstruction& inst, IrOpcode opcode) {
+IrU32 TranslationContext::saturateInteger16(const RdnaOperand& destination, IrU32 value, bool sign) {
+    if (!destination.clamp) {
+        return value;
+    }
+    IrValue& lower = ir.Emit(IrOpcode::SMax32, IrType::U32, {&value.Value(), &ir.Constant(sign ? 0xffff8000u : 0u)});
+    return IrU32(ir.Emit(IrOpcode::SMin32, IrType::U32, {&lower, &ir.Constant(sign ? 0x7fffu : 0xffffu)}));
+}
+
+bool TranslationContext::packedInteger16Binary(const RdnaInstruction& inst, IrOpcode opcode, bool sign) {
     const auto translateLane = [&](bool highLane) {
-        const IrU32 lhs = readU16LaneAsU32(sourceAt(inst, 0u), highLane, false);
-        const IrU32 rhs = readU16LaneAsU32(sourceAt(inst, 1u), highLane, false);
-        return IrU32(ir.Emit(opcode, IrType::U32, {&lhs.Value(), &rhs.Value()}));
+        const IrU32 lhs = readU16LaneAsU32(sourceAt(inst, 0u), highLane, sign);
+        const IrU32 rhs = readU16LaneAsU32(sourceAt(inst, 1u), highLane, sign);
+        return saturateInteger16(inst.destination, IrU32(ir.Emit(opcode, IrType::U32, {&lhs.Value(), &rhs.Value()})), sign);
     };
     const IrU32 low = translateLane(false);
     const IrU32 high = translateLane(true);
@@ -99,11 +107,14 @@ bool TranslationContext::packedInteger16Binary(const RdnaInstruction& inst, IrOp
 
 bool TranslationContext::packedInteger16Mad(const RdnaInstruction& inst, bool sign) {
     const auto translateLane = [&](bool highLane) {
-        const IrU32 lhs = readU16LaneAsU32(sourceAt(inst, 0u), highLane, false);
-        const IrU32 rhs = readU16LaneAsU32(sourceAt(inst, 1u), highLane, false);
-        const IrU32 product(ir.IMul(lhs.Value(), rhs.Value()));
+        const IrU32 lhs = readU16LaneAsU32(sourceAt(inst, 0u), highLane, sign);
+        const IrU32 rhs = readU16LaneAsU32(sourceAt(inst, 1u), highLane, sign);
+        IrU32 product(ir.IMul(lhs.Value(), rhs.Value()));
+        if (inst.destination.clamp && !sign) {
+            product = IrU32(ir.Emit(IrOpcode::UMin32, IrType::U32, {&product.Value(), &ir.Constant(0xffffu)}));
+        }
         const IrU32 addend = readU16LaneAsU32(sourceAt(inst, 2u), highLane, sign);
-        return IrU32(ir.IAdd(product.Value(), addend.Value()));
+        return saturateInteger16(inst.destination, IrU32(ir.IAdd(product.Value(), addend.Value())), sign);
     };
     const IrU32 low = translateLane(false);
     const IrU32 high = translateLane(true);
