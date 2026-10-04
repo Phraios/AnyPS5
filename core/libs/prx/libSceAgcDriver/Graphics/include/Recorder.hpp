@@ -110,6 +110,8 @@ public:
     // overlapping in-flight batch's fence has signaled (its in-place GPU stores are final in host
     // memory; its completion stores are the caller's business, see VulkanDevice::CopyBuffer).
     bool PendingWriteSettled(std::uint64_t address, std::size_t bytes) const;
+    std::uint64_t LastWriteNote(std::uint64_t address, std::size_t bytes) const;
+    std::uint64_t NewestWriteNote(std::uint64_t address, std::size_t bytes) const;
     // Batch read tracking: the guest ranges the recorded work reads IN PLACE through a host import
     // and the GPU has not executed yet (a V# element bound in place, a region the GPU copies out of
     // an import, an address-based build's leased heaps, indirect arguments, a GPU-direct storage
@@ -176,7 +178,10 @@ public:
     // Submits and waits for every batch, running completions in order.
     void Sync();
     void CountSamples();
-    static std::uint64_t SamplesPassed();
+    bool RecordMeshArguments(VkCommandBuffer commands, VkDeviceAddress record, VkDeviceAddress arguments, std::span<const std::uint32_t, 7> rules);
+    std::uint64_t SamplesTotal();
+    bool DumpSamples(VkDeviceAddress target);
+    void NoteSampledDraw();
     // Waits only for the batches up to the newest one that writes the range (submitting the open
     // batch when it is that one); later batches stay in flight. Fences of one queue signal in
     // submission order, so completions still run in order. Debug aid: APS5_NO_SYNC_THROUGH=1 syncs all.
@@ -273,6 +278,7 @@ public:
     // inside [address, address + bytes): a range query for large ranges (a fill of megabytes),
     // where a per-dword lookup would not do.
     bool PendingLabelIn(std::uint64_t address, std::size_t bytes) const;
+    bool CompletionLabelIn(std::uint64_t address, std::size_t bytes) const;
     // PendingLabel of the active recorder WITHOUT GuestMemory::GpuMutex: the table has a small mutex
     // of its own (every mutation holds both), so a WAIT_REG_MEM consults it without queueing behind
     // device work. Nothing is done under the table mutex but the lookup (it never takes the GPU mutex).
@@ -485,6 +491,7 @@ private:
         std::vector<std::shared_ptr<void>> kept;
         std::vector<std::function<void()>> completions;
         std::vector<std::pair<std::uint64_t, std::uint64_t>> writes;
+        std::vector<std::uint64_t> writeNotes;
         // In-place reads (see NotePendingRead), dying with the batch: a finished batch's reads are done.
         struct Read {
             std::uint64_t begin;
@@ -501,6 +508,9 @@ private:
         std::chrono::steady_clock::time_point submittedAt{};
         VkQueryPool queries = VK_NULL_HANDLE;
         VkQueryPool samples = VK_NULL_HANDLE;
+        std::shared_ptr<void> samplePool;
+        bool sampleActive = false;
+        bool samplesDrawn = false;
         std::vector<std::uint64_t> timedKeys;
         std::vector<std::uint64_t> timedBytes;
         // The whole-batch timed range (BatchTimingKey) and its stamps once read (see Completed).
@@ -599,7 +609,23 @@ private:
     void readGpuTiming(Batch& batch);
     void beginSamples(Batch& batch);
     void readSamples(Batch& batch);
+    bool gpuSampleCounter();
+    void endSamples(Batch& batch);
+    void foldSamples(Batch& batch, VkDeviceAddress target);
+    struct SampleSegment {
+        std::shared_ptr<void> pool;
+        VkQueryPool handle;
+    };
+    std::vector<SampleSegment> pendingSamples;
     bool countingSamples = false;
+    int meshArgumentState = 0;
+    VkPipelineLayout meshArgumentLayout = VK_NULL_HANDLE;
+    VkPipeline meshArgumentPipeline = VK_NULL_HANDLE;
+    int sampleCounterState = 0;
+    std::unique_ptr<Buffer> sampleCounter;
+    VkPipelineLayout sampleLayout = VK_NULL_HANDLE;
+    VkPipeline samplePipeline = VK_NULL_HANDLE;
+    std::shared_ptr<void> samplePools;
     // BeginGpuTiming on the open batch without Commands() (RecordStore times its own run, which
     // Commands() would close).
     std::uint32_t beginTiming(std::uint64_t key);
@@ -692,6 +718,7 @@ private:
     // snapshot (a rebuild from inside a completion must not drop them) until finish returns.
     std::vector<const Batch*> finishing;
     std::uint64_t submissions = 0;
+    std::uint64_t writeNoteCount = 0;
     // Command buffers and fences of completed batches, reused by later ones (hundreds of batches per
     // frame would otherwise allocate and free their objects each time).
     std::vector<std::pair<VkCommandBuffer, VkFence>> spare;
