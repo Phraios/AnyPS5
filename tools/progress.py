@@ -10,7 +10,7 @@ PRX = ROOT / "core" / "libs" / "prx"
 OPCODES = ROOT / "core" / "shader" / "recompiler" / "RdnaDecoder" / "include" / "RdnaDecoder" / "RdnaOpcode.hpp"
 ISA = Path(__file__).resolve().parent / "rdna_isa.txt"
 SOURCE = f'https://github.com/{os.environ.get("GITHUB_REPOSITORY", "boykopovar/AnyPS5")}/blob/main'
-DEFINITION = re.compile(r"\bAPS5_VABI\s+(\w+)\s*\([^;{]*\)\s*(?:noexcept\s*)?\{")
+DEFINITION = re.compile(r"\bAPS5_VABI\s+(\w+)\s*\([^;{]*\)\s*(?:noexcept\s*)?(?:try\s*)?\{")
 STUB = "NotImplemented_nid_no_patch"
 STUB_WRAPPER = re.compile(r"\bstatic\s+(?:\[\[noreturn\]\]\s+)?void\s+(\w+)\s*\([^;{]*\)\s*\{")
 FLAT_SEGMENTS = ("GLOBAL_", "SCRATCH_")
@@ -26,6 +26,7 @@ OPCODE_ALIASES = {
     "VMadMixhiF16": "V_FMA_MIXHI_F16",
 }
 OPCODE_VARIANTS = {
+    "SEndpgm": ("S_ENDPGM_SAVED", "S_ENDPGM_ORDERED_PS_DONE"),
     "VFmaF32": ("V_FMA_MIX_F32",),
     "SAddI32": ("S_ADDK_I32",),
     "SCmpEqI32": ("S_CMPK_EQ_I32",),
@@ -49,6 +50,8 @@ OPCODE_VARIANTS = {
     "VMacF32": ("V_FMAC_F32",),
     "VMadmkF32": ("V_FMAMK_F32",),
     "VMadakF32": ("V_FMAAK_F32",),
+    "VMacLegacyF32": ("V_FMAC_LEGACY_F32",),
+    "VMadLegacyF32": ("V_FMA_LEGACY_F32",),
     "ImageSample": ("IMAGE_SAMPLE_L", "IMAGE_SAMPLE_B", "IMAGE_SAMPLE_C_LZ", "IMAGE_SAMPLE_L_O", "IMAGE_SAMPLE_D_CL_O"),
 }
 REPORT_ROWS = 100

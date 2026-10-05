@@ -162,6 +162,18 @@ void testDecode() {
     expectFailure([&] { AgcDriver::ReadDisplayBuffer(buffer); });
     buffer.address = std::numeric_limits<uint64_t>::max() & ~uint64_t{65535};
     expectFailure([&] { AgcDriver::DisplayBufferSize(buffer); });
+    const VideoOutBuffer registered{0, reinterpret_cast<uint64_t>(tiled.data()), 0};
+    BufferAttributeGroup group{};
+    sceVideoOutSetBufferAttribute2(&group.attribute, 0x8000000000000000ull, 0, 259, 137, VIDEO_OUT_BUFFER_ATTRIBUTE_OPTION_NONE, 0, 0);
+    group.occupied = true;
+    const auto plain = DescribeVideoOutBuffer(registered, group);
+    group.attribute.option = VIDEO_OUT_BUFFER_ATTRIBUTE_OPTION_STRICT_COLORIMETRY;
+    const auto strict = DescribeVideoOutBuffer(registered, group);
+    check(strict.address == plain.address && strict.pixelFormat == plain.pixelFormat && strict.width == plain.width && strict.height == plain.height && strict.tilingMode == plain.tilingMode && strict.pitchInPixel == plain.pitchInPixel, "the STRICT_COLORIMETRY option changed the described buffer");
+    for (const uint64_t option : {1ull, 32ull, 40ull}) {
+        group.attribute.option = option;
+        check(expectFailure([&] { DescribeVideoOutBuffer(registered, group); }).find("buffer option " + std::to_string(option)) != std::string::npos, "an unsupported buffer option was accepted");
+    }
 }
 
 void testOpenParam() {

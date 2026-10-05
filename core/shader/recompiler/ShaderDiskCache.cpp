@@ -1,6 +1,7 @@
 #include "ShaderDiskCache.hpp"
 #include "CacheKey.hpp"
 #include "ShaderCacheDirectory.hpp"
+#include "ThreadOwned.hpp"
 #ifdef _WIN32
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -63,7 +64,7 @@ namespace ShaderRecompiler::ShaderDiskCache {
 
 #if defined(__linux__) && defined(__x86_64__) && defined(__GLIBCXX__)
 static_assert(sizeof(RecompileResult) == 176, "RecompileResult changed: update EncodeResult and DecodeResult");
-static_assert(sizeof(DescriptorBinding) == 264, "DescriptorBinding changed: update the binding encoder");
+static_assert(sizeof(DescriptorBinding) == 304, "DescriptorBinding changed: update the binding encoder");
 static_assert(sizeof(VertexAttribute) == 28, "VertexAttribute changed: update the attribute encoder");
 static_assert(sizeof(FragmentParameter) == 12, "FragmentParameter changed: update the parameter encoder");
 static_assert(sizeof(CompiledShaderInfo) == 304, "CompiledShaderInfo changed: update the info encoder");
@@ -247,6 +248,7 @@ void encodeBinding(Writer& writer, const DescriptorBinding& binding) {
     writer.Flags(binding.samplerDepthCompare);
     writer.Flags(binding.imageWritten);
     writer.Flags(binding.imageDepthCompare);
+    writer.Flags(binding.imageAtomic);
     writer.Flags(binding.bufferAtomic);
     writer.Flags(binding.bufferWritten);
 }
@@ -265,6 +267,7 @@ void decodeBinding(Reader& reader, DescriptorBinding& binding) {
     reader.Flags(binding.samplerDepthCompare);
     reader.Flags(binding.imageWritten);
     reader.Flags(binding.imageDepthCompare);
+    reader.Flags(binding.imageAtomic);
     reader.Flags(binding.bufferAtomic);
     reader.Flags(binding.bufferWritten);
 }
@@ -603,7 +606,8 @@ public:
     bool Load(std::span<const std::byte> key, CompiledVariant& variant) {
         const auto started = std::chrono::steady_clock::now();
         const auto name = EntryName(key);
-        thread_local std::vector<std::byte> file;
+        thread_local std::vector<std::byte>* fileSlot = nullptr;
+        auto& file = ThreadOwned(fileSlot);
         bool loaded = false;
         if (!ReadWholeFile(directory / name, file)) {
             misses.fetch_add(1, std::memory_order_relaxed);
@@ -778,7 +782,8 @@ void BuildKey(const RecompileRequest& request, std::uint32_t hostSubgroupSize, c
     writer.Value(FileMagic);
     writer.Value(FormatVersion);
     writer.Value(SourceVersion());
-    thread_local std::vector<std::uint64_t> memoryKey;
+    thread_local std::vector<std::uint64_t>* memoryKeySlot = nullptr;
+    auto& memoryKey = ThreadOwned(memoryKeySlot);
     RecompileCacheKey::Build(request, memoryKey);
     writer.Values(std::span<const std::uint64_t>(memoryKey));
     writer.Values(request.shader.code);

@@ -191,6 +191,25 @@ void stateTests() {
     log.clear();
     static_cast<void>(AgcDriver::Graphics::DecodeState(queue));
     Require(log.empty(), "the register facade recorded without a log");
+    queue = makeState();
+    queue.context.erase(0x1b3);
+    queue.context.erase(0x1b4);
+    queue.context.erase(0x1c5);
+    queue.shader[0x008] = 0x100;
+    queue.shader[0x009] = 0;
+    Require(!AgcDriver::Graphics::PixelProgramUnset(queue), "a pixel program address was read as unset");
+    Require(AgcDriver::Graphics::DrawRejection(queue, true).find("missing register at DWORD 0x1b3") != std::string::npos, "a real pixel program without SPI_PS_INPUT_ENA was accepted");
+    expectFailure([&] { AgcDriver::Graphics::DecodePixelStageInfo(queue.context, std::array<std::uint8_t, 8>{0xe4u, 0xe4u, 0xe4u, 0xe4u, 0xe4u, 0xe4u, 0xe4u, 0xe4u}); }, "missing register");
+    queue.shader[0x008] = 0;
+    Require(AgcDriver::Graphics::PixelProgramUnset(queue), "a zero pixel program address was not read as unset");
+    Require(AgcDriver::Graphics::DrawRejection(queue, true).find("writes color") != std::string::npos, "a draw without a pixel program that writes color was accepted");
+    queue.context[0x8e] = 0;
+    Require(AgcDriver::Graphics::DrawRejection(queue, true).empty(), "a depth-only draw without a pixel program was rejected");
+    state = AgcDriver::Graphics::DecodeState(queue);
+    Require(!state.hasColorTarget, "a depth-only draw without a pixel program decoded a color target");
+    const auto unset = AgcDriver::Graphics::DecodePixelStageInfo(queue.context, AgcDriver::Graphics::ExportMappings(state), true);
+    Require(unset.inputAddr == ShaderRecompiler::PixelInputBit(ShaderRecompiler::PixelInput::PerspectiveCenter), "unset pixel inputs of the null program did not read as PERSP_CENTER_ENA");
+    for (const auto mode : unset.targetOutputMode) Require(mode == 0, "an unset SPI_SHADER_COL_FORMAT exported a color");
 }
 
 void hardwareScreenOffsetTests() {
@@ -449,6 +468,36 @@ void DisabledColorTests() {
     expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "missing register");
 }
 
+void CompactedExportTests() {
+    alignas(256) static std::array<std::byte, 1024> slotFourMemory{};
+    const auto slotFour = reinterpret_cast<std::uintptr_t>(slotFourMemory.data());
+    auto queue = makeState();
+    for (const auto offset : {0x31bu, 0x31cu, 0x31du}) queue.context[offset + 4u * 0xfu] = queue.context.at(offset);
+    for (const auto offset : {0x3b0u, 0x3b8u}) queue.context[offset + 4u] = queue.context.at(offset);
+    queue.context[0x318 + 4u * 0xfu] = static_cast<std::uint32_t>(slotFour >> 8u);
+    queue.context[0x390 + 4u] = static_cast<std::uint32_t>(slotFour >> 40u);
+    queue.context[0x1e4] = 0x40010001u;
+    for (std::uint32_t i = 0; i < 4; ++i) queue.context[0x105 + i] = 0;
+    queue.context[0x8e] = 0x3000fu;
+    queue.context[0x8f] = 0xf000fu;
+    queue.context[0x1c5] = 0x44u;
+    auto state = AgcDriver::Graphics::DecodeState(queue);
+    Require(state.colors.size() == 2 && state.blends.size() == 2, "two compacted exports did not give two attachments");
+    Require(state.colors[0].slot == 0 && state.colors[0].exportIndex == 0 && state.colors[0].address == reinterpret_cast<std::uintptr_t>(colorMemory.data()), "export 0 did not reach MRT slot 0");
+    Require(state.colors[1].slot == 4 && state.colors[1].exportIndex == 1 && state.colors[1].address == slotFour, "export 1 did not reach MRT slot 4, the second slot CB_SHADER_MASK enables");
+    Require(!state.blends[0].blendEnable && state.blends[1].blendEnable && state.blends[1].colorWriteMask == (VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT), "export 1 did not take MRT slot 4's blend control and target mask");
+    Require(AgcDriver::Graphics::ExportMappings(state)[1] == state.colors[1].componentMapping, "export 1 did not take MRT slot 4's component mapping");
+    queue.context[0x1c5] = 0x90009u;
+    expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "color export format 0");
+    queue.context[0x8e] = 0xf000fu;
+    queue.context[0x8f] = 0xf0f0fu;
+    queue.context[0x1c5] = 0x999u;
+    state = AgcDriver::Graphics::DecodeState(queue);
+    Require(state.colors.size() == 2 && state.blends.size() == 3, "a write-masked export between written ones changed the attachment count");
+    Require(state.colors[0].exportIndex == 0 && state.colors[1].slot == 4 && state.colors[1].exportIndex == 2, "export 2 did not reach MRT slot 4, the third slot CB_SHADER_MASK enables");
+    Require(state.blends[1].colorWriteMask == 0 && !state.blends[1].blendEnable && state.blends[2].blendEnable, "the write-masked export 1 was not left unused");
+}
+
 void DepthStencilTests() {
     auto queue = makeState();
     queue.context[0x000] = 0;
@@ -679,9 +728,23 @@ void DepthClipTests() {
     expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "inverted viewport depth clamp");
     queue.context[0xb4] = 0;
     for (std::uint32_t bit = 0; bit < 32; ++bit) {
-        if (bit == 19 || bit == 26 || bit == 27) continue;
-        queue.context[0x204] = 1u << bit;
-        expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "PA_CL_CLIP_CNTL");
+        if (bit == 19 || bit == 24 || bit == 26 || bit == 27) continue;
+        for (const auto linearBit : {0u, 0x01000000u}) {
+            queue.context[0x204] = (1u << bit) | linearBit;
+            expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "PA_CL_CLIP_CNTL");
+            Require(AgcDriver::Graphics::DrawRejection(queue, false).find("PA_CL_CLIP_CNTL") != std::string::npos, "the precheck accepted an unsupported PA_CL_CLIP_CNTL bit");
+        }
+    }
+    queue = makeState();
+    queue.context[0x1b3] = 2;
+    queue.context[0x1b4] = 2;
+    for (const auto clip : {0x00080000u, 0x00000000u, 0x0c080000u, 0x04000000u}) {
+        queue.context[0x204] = clip;
+        const auto plain = AgcDriver::Graphics::DecodeState(queue);
+        queue.context[0x204] = clip | 0x01000000u;
+        const auto linearClip = AgcDriver::Graphics::DecodeState(queue);
+        Require(AgcDriver::Graphics::DrawRejection(queue, false).empty(), "the precheck rejected DX_LINEAR_ATTR_CLIP_ENA");
+        Require(linearClip.negativeOneToOne == plain.negativeOneToOne && linearClip.depthClamp == plain.depthClamp && linearClip.viewport.minDepth == plain.viewport.minDepth && linearClip.viewport.maxDepth == plain.viewport.maxDepth, "DX_LINEAR_ATTR_CLIP_ENA changed the clip space, depth clamping or depth range");
     }
 }
 
@@ -1860,6 +1923,7 @@ int main() {
         DepthStencilTests();
         DepthBoundsBiasTests();
         DisabledColorTests();
+        CompactedExportTests();
         metadataPassTests();
         ShaderStageTests();
         PixelInputLayoutTests();

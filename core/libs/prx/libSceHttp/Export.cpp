@@ -246,15 +246,19 @@ int APS5_VABI sceHttpSetChunkedTransferEnabled(int id, int enable) {
 }
 
 
-APS5_EXPORT("i9mhafzkEi8", sceHttpUnknown00);
-int APS5_VABI sceHttpUnknown00(void) {
-    NotImplemented_nid_no_patch("i9mhafzkEi8");
+int APS5_VABI sceHttpSetInflateGZIPEnabled(int id, int enable) {
+    (void)id;
+    if (static_cast<uint32_t>(enable) > 1) return ERROR_INVALID_VALUE;
     return 0;
 }
 
-APS5_EXPORT("vO4B-42ef-k", sceHttpUnknown01);
-int APS5_VABI sceHttpUnknown01(void) {
-    NotImplemented_nid_no_patch("vO4B-42ef-k");
+int APS5_VABI sceHttpSetRequestStatusCallback(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceHttpParseResponseHeader(void) {
+    NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
