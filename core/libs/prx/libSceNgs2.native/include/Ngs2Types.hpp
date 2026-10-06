@@ -46,6 +46,7 @@ static constexpr std::uint32_t SCE_NGS2_SAMPLER_VOICE_PARAM_SETUP = 0x10000000;
 static constexpr std::uint32_t SCE_NGS2_SAMPLER_VOICE_PARAM_ADD_WAVEFORM_BLOCKS = 0x10000001;
 static constexpr std::uint32_t SCE_NGS2_SAMPLER_VOICE_PARAM_EXIT_LOOP = 0x10000004;
 static constexpr std::uint32_t SCE_NGS2_SAMPLER_VOICE_PARAM_PITCH = 0x10000005;
+static constexpr std::uint32_t SCE_NGS2_SAMPLER_VOICE_PARAM_FILTER = 0x1000000a;
 static constexpr std::uint32_t SCE_NGS2_SUBMIXER_VOICE_PARAM_SETUP = 0x20000000;
 static constexpr std::uint32_t SCE_NGS2_MASTERING_VOICE_PARAM_SETUP = 0x30000000;
 static constexpr std::uint32_t SCE_NGS2_MASTERING_VOICE_PARAM_OUTPUT = 0x30000005;
@@ -253,6 +254,19 @@ struct Ngs2SamplerVoicePitchParam {
     Ngs2VoiceParamHeader header;
     float ratio;
 };
+
+struct Ngs2SamplerVoiceFilterParam {
+    Ngs2VoiceParamHeader header;
+    std::uint32_t index;
+    std::uint32_t location;
+    std::uint32_t type;
+    std::uint64_t channel_mask;
+    float frequency;
+    float q;
+    float level;
+    std::uint32_t reserved[3];
+};
+static_assert(sizeof(Ngs2SamplerVoiceFilterParam) == 56);
 
 struct Ngs2SubmixerVoiceSetupParam {
     Ngs2VoiceParamHeader header;

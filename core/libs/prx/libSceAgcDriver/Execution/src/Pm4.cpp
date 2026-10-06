@@ -166,7 +166,7 @@ std::string_view UnsupportedReason(std::uint32_t header) {
         }
     }
     switch (opcode) {
-        case 0x11: case 0x12: case 0x13: case 0x15: case 0x16: case 0x22: case 0x26: case 0x27:
+        case 0x11: case 0x12: case 0x13: case 0x15: case 0x16: case 0x20: case 0x22: case 0x26: case 0x27:
         case 0x2a: case 0x2d: case 0x2f: case 0x35: case 0x37: case 0x40: case 0x42: case 0x46: case 0x50:
         case 0x58: case 0x63: case 0x64: case 0x69: case 0x76: case 0x79: case 0x7a:
         case 0x81: case 0x83: case 0x9f: return {};
@@ -175,7 +175,6 @@ std::string_view UnsupportedReason(std::uint32_t header) {
             return {};
         case 0x3a: case 0x8d:
             return "graphics draw, shader stages and guest render-target materialization are not implemented";
-        case 0x20: return "GPU query predication is not implemented";
         case 0x33: case 0x3f: return "nested command buffers, branching and nested flip reservation are not implemented";
         case 0x3c: case 0x93: return {};
         case 0x39:
@@ -213,7 +212,7 @@ void Validate(std::span<const std::uint32_t> packet, std::uint32_t queue) {
     const auto size = [&](std::size_t count) { require(packet.size() == count, "invalid packet size"); };
     const auto graphics = [&] { require(queue == 0, "graphics packet in compute queue"); };
     const auto reason = UnsupportedReason(header);
-    if (!reason.empty()) throw std::runtime_error(std::string(reason));
+    if (!reason.empty() && !(opcode == 0x3f && Predicated(header))) throw std::runtime_error(std::string(reason));
     if (opcode == 0x10) {
         require((header & 3u) == 0, "unsupported NOP header flags");
         switch ((header >> 2u) & 0x3fu) {
@@ -239,11 +238,11 @@ void Validate(std::span<const std::uint32_t> packet, std::uint32_t queue) {
         return;
     }
     // Header bit 1 selects the compute shader type and bit 2 (register writes) resets the filter CAM;
-    // neither changes what the packet writes. Predication (bit 0) is not implemented.
+    // neither changes what the packet writes.
     const auto flags = header & 0xffu;
     const bool registerWrite = opcode == 0x69 || opcode == 0x76 || opcode == 0x79 || opcode == 0x7a;
     auto allowedFlags = opcode == 0x11 ? 2u : registerWrite ? 6u : opcode == 0x3c || opcode == 0x93 ? 2u : 0u;
-    if (IsTagMarker(packet)) allowedFlags |= 1u;
+    if (opcode != 0x20 && opcode != 0x22) allowedFlags |= 1u;
     if ((flags & ~allowedFlags) != 0) throw std::runtime_error("PM4 header flags 0x" + ToHex(flags) + " are not implemented");
     switch (opcode) {
         case 0x11:
@@ -252,6 +251,17 @@ void Validate(std::span<const std::uint32_t> packet, std::uint32_t queue) {
             if ((header & 2u) == 0) graphics();
             break;
         case 0x12: graphics(); size(2); require((packet[1] & ~0xfu) == 0, "unsupported CLEAR_STATE payload bits"); break;
+        case 0x20: {
+            graphics();
+            size(4);
+            const auto operation = (packet[1] >> 16u) & 7u;
+            require(operation != 1 && operation != 2, "GPU query predication is not implemented");
+            require(operation == 0 || operation == 3 || operation == 4, "invalid predication operation");
+            require((packet[1] & ~0x71100u) == 0, "unsupported SET_PREDICATION bits");
+            if (operation != 0) require(address(packet[2], packet[3]) != 0 && (packet[2] & 0xfu) == 0, "unaligned predication address");
+            break;
+        }
+        case 0x3f: size(4); break;
         case 0x13: case 0x2f: graphics(); size(2); break;
         case 0x26: graphics(); size(3); break;
         case 0x27:
@@ -474,6 +484,16 @@ std::size_t WaitAwaitedBytes(std::span<const std::uint32_t> packet) {
 std::size_t ConditionalWords(std::span<const std::uint32_t> packet) {
     require(packet.size() == 5 && ((packet[0] >> 8u) & 0xffu) == 0x22u, "expected COND_EXEC packet");
     return packet[4] & ConditionalWordsMask;
+}
+
+bool PredicationPasses(const QueueState& queue) {
+    const auto& predication = queue.predication;
+    if (predication.operation == 0) return true;
+    const std::size_t bytes = predication.operation == 3 ? 8 : 4;
+    std::uint64_t value = 0;
+    const GuestMemory::ReadSiteScope site(GuestMemory::ReadSite::Wait);
+    GuestMemory::Read(predication.address, std::as_writable_bytes(std::span(&value, 1)).first(bytes), bytes);
+    return (value != 0) == predication.executeWhenSet;
 }
 
 std::uint32_t ReadCondition(std::span<const std::uint32_t> packet) {
@@ -725,6 +745,12 @@ void Execute(std::span<const std::uint32_t> packet, QueueState& queue) {
             APS5_LOG_OUT_DEBUG("CLEAR_STATE targetMaskBefore=0x%x shaderMaskBefore=0x%x", queue.context.contains(0x8e) ? queue.context.at(0x8e) : 0u, queue.context.contains(0x8f) ? queue.context.at(0x8f) : 0u);
             queue.ClearContext(); return;
         case 0x13: queue.indexBufferSize = packet[1]; return;
+        case 0x20: {
+            const auto operation = (packet[1] >> 16u) & 7u;
+            queue.predication = {operation == 0 ? 0 : address(packet[2], packet[3]), operation, (packet[1] & 0x100u) != 0};
+            return;
+        }
+        case 0x3f: throw std::runtime_error(std::string(UnsupportedReason(packet[0])));
         case 0x26: queue.indexBase = address(packet[1], packet[2]); return;
         case 0x2a: queue.indexType = packet[1]; return;
         case 0x2f: queue.instanceCount = packet[1]; return;

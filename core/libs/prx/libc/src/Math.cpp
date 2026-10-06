@@ -1,6 +1,7 @@
 #include <mutex>
 #include <cstdint>
 #include <cmath>
+#include <cstdlib>
 #include <cstdint>
 #include <cstring>
 #include <stdexcept>
@@ -8,6 +9,10 @@
 #include "prx/libc/include/General.hpp"
 
 extern "C" {
+
+std::lldiv_t APS5_VABI lldiv_nid_postfix(long long numerator, long long denominator) {
+    return std::lldiv(numerator, denominator);
+}
 
 float APS5_VABI fmodf_nid_postfix(float x, float y) { return std::fmod(x, y); }
 float APS5_VABI asinf_nid_postfix(float x) { return std::asin(x); }

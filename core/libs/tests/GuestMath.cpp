@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <initializer_list>
 extern "C" {
 double APS5_VABI atof_nid_postfix(const char*);
 float APS5_VABI strtof_nid_postfix(const char*, char**);
@@ -38,10 +39,18 @@ int APS5_VABI __isfinitef_nid_postfix(float);
 int APS5_VABI __isnormal_nid_postfix(double);
 int APS5_VABI __isnormalf_nid_postfix(float);
 int APS5_VABI __isinff_nid_postfix(float);
+std::lldiv_t APS5_VABI lldiv_nid_postfix(long long, long long);
 }
 static void Require(bool value) { if (!value) std::abort(); }
 
 static void CheckIntegerConversions() {
+    for (const long long numerator : {4294967301LL, -4294967301LL}) {
+        for (const long long denominator : {3LL, -3LL}) {
+            const auto result = lldiv_nid_postfix(numerator, denominator);
+            Require(result.quot == numerator / denominator && result.rem == numerator % denominator);
+            Require(result.quot * denominator + result.rem == numerator);
+        }
+    }
     struct SignedCase {
         const char* text;
         int base;

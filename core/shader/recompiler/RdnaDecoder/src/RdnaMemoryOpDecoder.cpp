@@ -59,6 +59,9 @@ constexpr MemoryOpcodeInfo smemOpcodes[] = {
     {0x02u, RdnaOpcode::SLoadDwordx4, 4, 32, false, false, false},
     {0x03u, RdnaOpcode::SLoadDwordx8, 8, 32, false, false, false},
     {0x04u, RdnaOpcode::SLoadDwordx16, 16, 32, false, false, false},
+    {0x05u, RdnaOpcode::SScratchLoadDword, 1, 32, false, false, false},
+    {0x06u, RdnaOpcode::SScratchLoadDwordx2, 2, 32, false, false, false},
+    {0x07u, RdnaOpcode::SScratchLoadDwordx4, 4, 32, false, false, false},
     {0x08u, RdnaOpcode::SBufferLoadDword, 1, 32, false, false, false},
     {0x09u, RdnaOpcode::SBufferLoadDwordx2, 2, 32, false, false, false},
     {0x0au, RdnaOpcode::SBufferLoadDwordx4, 4, 32, false, false, false},
@@ -434,6 +437,9 @@ RdnaOperand scalarDestination(std::uint32_t code) {
 
 RdnaOperand scalarDescriptorBase(std::uint32_t reg, std::uint32_t registerCount, const char* reason) {
     const auto operand = scalarSource(reg);
+    if (registerCount == 2u && operand.kind == RdnaOperandKind::VccLo) {
+        return operand;
+    }
     if (operand.kind != RdnaOperandKind::ScalarRegister || reg + (registerCount - 1u) > 105u) {
         throw std::runtime_error(reason);
     }

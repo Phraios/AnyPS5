@@ -62,4 +62,14 @@ if(BUILD_TESTING)
         set_tests_properties(audio_out2_latency PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceAudioOut>")
     endif()
+
+    add_test_executable(audio_out2_port_layouts_tests tests/AudioOut2PortLayouts.cpp)
+    target_include_directories(audio_out2_port_layouts_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(audio_out2_port_layouts_tests PRIVATE libSceAudioOut libc)
+    configure_windows_unwind(audio_out2_port_layouts_tests)
+    add_test(NAME audio_out2_port_layouts COMMAND audio_out2_port_layouts_tests)
+    if(WIN32)
+        set_tests_properties(audio_out2_port_layouts PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceAudioOut>")
+    endif()
 endif()

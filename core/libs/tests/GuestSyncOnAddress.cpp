@@ -12,6 +12,8 @@ extern "C" {
 int APS5_VABI sceKernelSyncOnAddressWait(std::uint32_t* address, std::uint32_t expected, const KernelUseconds* timeout, const char* name);
 int APS5_VABI sceKernelSyncOnAddressWait32(std::uint32_t* address, std::uint32_t expected, const KernelUseconds* timeout, const char* name);
 int APS5_VABI sceKernelSyncOnAddressWait64(std::uint64_t* address, std::uint64_t expected, const KernelUseconds* timeout, const char* name);
+int APS5_VABI sceKernelSyncOnAddressWait8(std::uint8_t* address, std::uint8_t expected, const KernelUseconds* timeout, const char* name);
+int APS5_VABI sceKernelSyncOnAddressWait16(std::uint16_t* address, std::uint16_t expected, const KernelUseconds* timeout, const char* name);
 int APS5_VABI sceKernelSyncOnAddressWake(void* address, std::int32_t count);
 }
 
@@ -198,6 +200,57 @@ static void WakeReleasesWaitersOfEverySize() {
     for (const int result : results) Require(result == SCE_OK);
 }
 
+static void NarrowWaitsCompareOnlyTheirWidth() {
+    const KernelUseconds none = 0;
+    alignas(4) std::uint8_t bytes[4] = {1, 5, 7, 7};
+    Require(sceKernelSyncOnAddressWait8(&bytes[1], 4, &none, "differs") == SCE_OK);
+    Require(sceKernelSyncOnAddressWait8(&bytes[1], 5, &none, "timeout") == SCE_KERNEL_ERROR_ETIMEDOUT);
+
+    alignas(4) std::uint16_t halves[2] = {1, 0x0705};
+    Require(sceKernelSyncOnAddressWait16(&halves[1], 0x0005, &none, "high") == SCE_OK);
+    Require(sceKernelSyncOnAddressWait16(&halves[1], 0x0705, &none, "timeout") == SCE_KERNEL_ERROR_ETIMEDOUT);
+}
+
+static void WakeReleasesNarrowWaitersAtTheirOwnAddress() {
+    alignas(4) std::uint16_t halves[2] = {0, 9};
+    auto* bytes = reinterpret_cast<std::uint8_t*>(halves);
+    bytes[1] = 3;
+    auto* half = &halves[1];
+    std::atomic<int> started{0};
+    std::atomic<int> byteFinished{0};
+    std::atomic<int> halfFinished{0};
+    int byteResult = -1;
+    int halfResult = -1;
+
+    std::thread byteWaiter([&] {
+        ++started;
+        byteResult = sceKernelSyncOnAddressWait8(&bytes[1], 3, &FAILSAFE_TIMEOUT, "byte");
+        ++byteFinished;
+    });
+    std::thread halfWaiter([&] {
+        ++started;
+        halfResult = sceKernelSyncOnAddressWait16(half, 9, &FAILSAFE_TIMEOUT, "half");
+        ++halfFinished;
+    });
+    AwaitCount(started, 2);
+    std::this_thread::sleep_for(SETTLE);
+
+    Require(sceKernelSyncOnAddressWake(&bytes[0], INT_MAX) == SCE_OK);
+    Require(sceKernelSyncOnAddressWake(&bytes[3], INT_MAX) == SCE_OK);
+    std::this_thread::sleep_for(SETTLE);
+    Require(byteFinished.load() == 0 && halfFinished.load() == 0);
+
+    Require(sceKernelSyncOnAddressWake(&bytes[1], 1) == SCE_OK);
+    AwaitCount(byteFinished, 1);
+    Require(halfFinished.load() == 0);
+    Require(sceKernelSyncOnAddressWake(half, 1) == SCE_OK);
+    AwaitCount(halfFinished, 1);
+
+    byteWaiter.join();
+    halfWaiter.join();
+    Require(byteResult == SCE_OK && halfResult == SCE_OK);
+}
+
 static void RejectsInvalidArguments() {
     std::uint32_t words[2] = {1, 1};
     auto* misaligned = reinterpret_cast<std::uint32_t*>(reinterpret_cast<unsigned char*>(words) + 1);
@@ -206,7 +259,10 @@ static void RejectsInvalidArguments() {
     Require(Rejects([&] { sceKernelSyncOnAddressWait32(nullptr, 1, nullptr, nullptr); }));
     Require(Rejects([&] { sceKernelSyncOnAddressWait32(misaligned, 1, nullptr, nullptr); }));
     Require(Rejects([&] { sceKernelSyncOnAddressWake(nullptr, 1); }));
-    Require(Rejects([&] { sceKernelSyncOnAddressWake(misaligned, 1); }));
+    Require(sceKernelSyncOnAddressWake(misaligned, 1) == SCE_OK);
+    Require(Rejects([&] { sceKernelSyncOnAddressWait8(nullptr, 1, nullptr, nullptr); }));
+    Require(Rejects([&] { sceKernelSyncOnAddressWait16(nullptr, 1, nullptr, nullptr); }));
+    Require(Rejects([&] { sceKernelSyncOnAddressWait16(reinterpret_cast<std::uint16_t*>(reinterpret_cast<unsigned char*>(words) + 1), 1, nullptr, nullptr); }));
     Require(Rejects([&] { sceKernelSyncOnAddressWake(words, -1); }));
 
     std::uint64_t values[2] = {1, 1};
@@ -224,5 +280,7 @@ int main() {
     SizedWaitsTimeOutWhileTheValueMatches();
     Wait64ComparesTheHighHalf();
     WakeReleasesWaitersOfEverySize();
+    NarrowWaitsCompareOnlyTheirWidth();
+    WakeReleasesNarrowWaitersAtTheirOwnAddress();
     RejectsInvalidArguments();
 }

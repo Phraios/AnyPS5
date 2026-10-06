@@ -47,6 +47,24 @@ struct Ngs2Atrac9 {
 
 struct Ngs2Voice;
 
+struct Ngs2FilterHistory {
+    double x1 = 0.0;
+    double x2 = 0.0;
+    double y1 = 0.0;
+    double y2 = 0.0;
+};
+
+struct Ngs2Filter {
+    bool enabled = false;
+    std::uint64_t bypassMask = 0;
+    double b0 = 1.0;
+    double b1 = 0.0;
+    double b2 = 0.0;
+    double a1 = 0.0;
+    double a2 = 0.0;
+    std::vector<Ngs2FilterHistory> history;
+};
+
 struct Ngs2Port {
     Ngs2Voice* dest = nullptr;
     float volume = 1.0f;
@@ -73,6 +91,7 @@ struct Ngs2Voice {
     std::uint32_t callbackFlags = 0;
     std::vector<Ngs2Port> ports;
     std::vector<std::vector<float>> matrices;
+    std::vector<Ngs2Filter> filters;
     std::uint32_t outputId = 0;
     std::vector<float> samples;
     bool rendering = false;
@@ -88,6 +107,7 @@ struct Ngs2Rack {
     Ngs2System* system = nullptr;
     std::uint32_t rackId = 0;
     std::uint32_t maxChannels = 0;
+    std::uint32_t maxFilters = 0;
     Ngs2ContextBufferInfo bufferInfo{};
     Ngs2BufferAllocator allocator{};
     std::vector<Ngs2Voice> voices;

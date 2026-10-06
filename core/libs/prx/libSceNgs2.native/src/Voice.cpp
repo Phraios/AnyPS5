@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <mutex>
+#include <numbers>
 #include <stdexcept>
 #include <string>
 
@@ -47,6 +48,7 @@ void Ngs2Voice::ResetSetup() {
     SetEvent(SCE_NGS2_VOICE_EVENT_STOP_IMM);
     std::fill(ports.begin(), ports.end(), Ngs2Port{});
     for (auto& matrix : matrices) matrix.clear();
+    filters.clear();
     channels = 0;
     sampleRate = 0;
     waveformType = 0;
@@ -178,6 +180,40 @@ static void AddWaveformBlocks(Ngs2Voice& voice, const Ngs2SamplerVoiceWaveformBl
     }
 }
 
+static void SetFilter(Ngs2Voice& voice, const Ngs2SamplerVoiceFilterParam& param) {
+    if (param.index >= voice.rack->maxFilters) APS5_INVALID_ARG_EX;
+    if (voice.filters.size() <= param.index) voice.filters.resize(param.index + 1);
+    auto& filter = voice.filters[param.index];
+    if (param.type == 0) {
+        filter = {};
+        return;
+    }
+    if (param.location != 1 || param.type != 1) {
+        throw std::runtime_error("NGS2: sampler filter location " + std::to_string(param.location) + " type " + std::to_string(param.type) + " is not implemented");
+    }
+    if (!std::isfinite(param.frequency) || param.frequency < 0.0f || !std::isfinite(param.q) || param.q <= 0.0f || !std::isfinite(param.level) || param.level < 0.0f) {
+        APS5_INVALID_ARG_EX;
+    }
+    const double rate = voice.rack->system->option.sample_rate;
+    filter.enabled = true;
+    filter.bypassMask = param.channel_mask;
+    filter.history.resize(voice.channels);
+    if (param.frequency == 0.0f || param.frequency >= rate * 0.5) {
+        filter.b0 = param.frequency == 0.0f ? 0.0 : param.level;
+        filter.b1 = filter.b2 = filter.a1 = filter.a2 = 0.0;
+        return;
+    }
+    const double omega = 2.0 * std::numbers::pi * param.frequency / rate;
+    const double cosine = std::cos(omega);
+    const double alpha = std::sin(omega) / (2.0 * param.q);
+    const double inverseA0 = 1.0 / (1.0 + alpha);
+    filter.b0 = (1.0 - cosine) * 0.5 * inverseA0 * param.level;
+    filter.b1 = 2.0 * filter.b0;
+    filter.b2 = filter.b0;
+    filter.a1 = -2.0 * cosine * inverseA0;
+    filter.a2 = (1.0 - alpha) * inverseA0;
+}
+
 static void ApplySamplerParam(Ngs2Voice& voice, const Ngs2VoiceParamHeader& param) {
     switch (param.id) {
         case SCE_NGS2_SAMPLER_VOICE_PARAM_SETUP: SetupSampler(voice, ParamAs<Ngs2SamplerVoiceSetupParam>(param).format); break;
@@ -193,6 +229,7 @@ static void ApplySamplerParam(Ngs2Voice& voice, const Ngs2VoiceParamHeader& para
             voice.pitch = ratio;
             break;
         }
+        case SCE_NGS2_SAMPLER_VOICE_PARAM_FILTER: SetFilter(voice, ParamAs<Ngs2SamplerVoiceFilterParam>(param)); break;
         default: throw std::runtime_error("NGS2: sampler voice param " + Ngs2Hex(param.id) + " is not implemented");
     }
 }

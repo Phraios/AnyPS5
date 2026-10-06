@@ -14,11 +14,13 @@
 #include <cstring>
 #include <cstdarg>
 #include <filesystem>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #ifdef _WIN32
 #include <windows.h>
 #include <io.h>
+#include <fcntl.h>
 #include <direct.h>
 #include <sys/stat.h>
 #include <sys/utime.h>
@@ -32,6 +34,30 @@ static int NativeMkdir(const std::filesystem::path& path, std::uint16_t mode) {
 static int NativeChmod(const std::filesystem::path& path, int mode) {
     return ::_wchmod(path.wstring().c_str(), mode);
 }
+static std::optional<std::filesystem::path> NativeDescriptorPath(int descriptor) {
+    if (auto directory = File::DirectoryDescriptorPath(descriptor)) return directory;
+    const auto handle = reinterpret_cast<HANDLE>(::_get_osfhandle(descriptor));
+    if (handle == INVALID_HANDLE_VALUE) {
+        errno = EBADF;
+        return std::nullopt;
+    }
+    std::wstring path(MAX_PATH, L'\0');
+    auto length = ::GetFinalPathNameByHandleW(handle, path.data(), static_cast<DWORD>(path.size()), FILE_NAME_NORMALIZED);
+    if (length >= path.size()) {
+        path.resize(length);
+        length = ::GetFinalPathNameByHandleW(handle, path.data(), length, FILE_NAME_NORMALIZED);
+    }
+    if (length == 0 || length >= path.size()) {
+        errno = EINVAL;
+        return std::nullopt;
+    }
+    path.resize(length);
+    return path;
+}
+static int NativeFchmod(int descriptor, int mode) {
+    const auto path = NativeDescriptorPath(descriptor);
+    return path ? NativeChmod(*path, mode) : -1;
+}
 static int NativeFtruncate(int descriptor, std::int64_t length) {
     return static_cast<int>(::_chsize_s(descriptor, length));
 }
@@ -39,6 +65,10 @@ static int NativeUtimes(const std::filesystem::path& path, const KernelTimeval* 
     if (times == nullptr) return ::_wutime(path.wstring().c_str(), nullptr);
     struct _utimbuf values{static_cast<time_t>(times[0].tv_sec), static_cast<time_t>(times[1].tv_sec)};
     return ::_wutime(path.wstring().c_str(), &values);
+}
+static int NativeFutimes(int descriptor, const KernelTimeval* times) {
+    const auto path = NativeDescriptorPath(descriptor);
+    return path ? NativeUtimes(*path, times) : -1;
 }
 static int NativeFlock(int descriptor, int operation) {
     HANDLE handle = reinterpret_cast<HANDLE>(::_get_osfhandle(descriptor));
@@ -99,6 +129,9 @@ static int NativeMkdir(const std::filesystem::path& path, std::uint16_t mode) {
 static int NativeChmod(const std::filesystem::path& path, int mode) {
     return ::chmod(path.c_str(), static_cast<mode_t>(mode));
 }
+static int NativeFchmod(int descriptor, int mode) {
+    return ::fchmod(descriptor, static_cast<mode_t>(mode));
+}
 static int NativeFtruncate(int descriptor, std::int64_t length) {
     return ::ftruncate(descriptor, static_cast<off_t>(length));
 }
@@ -107,6 +140,12 @@ static int NativeUtimes(const std::filesystem::path& path, const KernelTimeval* 
     struct timeval values[2]{{static_cast<time_t>(times[0].tv_sec), static_cast<suseconds_t>(times[0].tv_usec)},
         {static_cast<time_t>(times[1].tv_sec), static_cast<suseconds_t>(times[1].tv_usec)}};
     return ::utimes(path.c_str(), values);
+}
+static int NativeFutimes(int descriptor, const KernelTimeval* times) {
+    if (times == nullptr) return ::futimes(descriptor, nullptr);
+    struct timeval values[2]{{static_cast<time_t>(times[0].tv_sec), static_cast<suseconds_t>(times[0].tv_usec)},
+        {static_cast<time_t>(times[1].tv_sec), static_cast<suseconds_t>(times[1].tv_usec)}};
+    return ::futimes(descriptor, values);
 }
 static int NativeFlock(int descriptor, int operation) {
     return ::flock(descriptor, operation);
@@ -121,6 +160,7 @@ static std::int64_t NativePwrite(int descriptor, const void* buf, std::size_t nb
 
 static constexpr int GUEST_ENOENT = 2;
 static constexpr int GUEST_EIO = 5;
+static constexpr int GUEST_EBADF = 9;
 static constexpr int GUEST_EFAULT = 14;
 static constexpr int GUEST_EEXIST = 17;
 static constexpr int GUEST_EINVAL = 22;
@@ -141,6 +181,21 @@ static int PosixFailure(int error) {
 
 static int PosixResult(int result) {
     return result < 0 ? PosixFailure(result & 0xffff) : result;
+}
+
+extern "C" int APS5_VABI pipe_nid_postfix(int* descriptors) {
+    if (!descriptors) return PosixFailure(GUEST_EFAULT);
+    const GuestArena::HostWrite destination(descriptors, 2 * sizeof(int));
+    if (!destination.Open()) return PosixFailure(GUEST_EFAULT);
+    int native[2];
+#ifdef _WIN32
+    const int result = ::_pipe(native, 4096, _O_BINARY);
+#else
+    const int result = ::pipe(native);
+#endif
+    if (result != 0) return PosixFailure(SceErrorFromErrno(errno) & 0xffff);
+    std::memcpy(descriptors, native, sizeof(native));
+    return 0;
 }
 
 static int PathError(const char* path) {
@@ -469,6 +524,16 @@ int APS5_VABI sceKernelChmod_nid_postfix(const char* path, std::uint16_t mode) {
     return chmod_nid_postfix(path, mode);
 }
 
+int APS5_VABI sceKernelFchmod(int d, std::uint16_t mode) {
+    if (d >= GuestSockets::FirstDescriptor) return SceErrorFromErrno(GuestSockets::IsOpen(d) ? GUEST_EINVAL : GUEST_EBADF);
+    if (NativeFchmod(d, mode & 07777) != 0) return SceErrorFromErrno(errno);
+    return 0;
+}
+
+int APS5_VABI fchmod_nid_postfix(int d, int mode) {
+    return PosixResult(sceKernelFchmod(d, static_cast<std::uint16_t>(mode)));
+}
+
 int APS5_VABI sceKernelTruncate_nid_postfix(const char* path, std::int64_t length) {
     if (path == nullptr) throw std::invalid_argument("sceKernelTruncate: path is null");
     if (length < 0) return SceErrorFromErrno(GUEST_EINVAL);
@@ -484,6 +549,27 @@ int APS5_VABI sceKernelUtimes_nid_postfix(const char* path, const KernelTimeval*
     if (path == nullptr) throw std::invalid_argument("sceKernelUtimes: path is null");
     const auto native = ResolvePath_nid_no_patch(path);
     if (NativeUtimes(native, times) != 0) return SceErrorFromErrno(errno);
+    return 0;
+}
+
+int APS5_VABI utimes_nid_postfix(const char* path, const KernelTimeval* times) {
+    if (const int error = PathError(path)) return PosixFailure(error);
+    return PosixResult(sceKernelUtimes_nid_postfix(path, times));
+}
+
+int APS5_VABI futimes_nid_postfix(int d, const KernelTimeval* times) {
+    if (d >= GuestSockets::FirstDescriptor) return PosixFailure(GuestSockets::IsOpen(d) ? GUEST_EINVAL : GUEST_EBADF);
+    if (times != nullptr) {
+        for (int i = 0; i < 2; ++i) {
+            if (times[i].tv_usec < 0 || times[i].tv_usec >= 1000000) return PosixFailure(GUEST_EINVAL);
+        }
+    }
+    if (NativeFutimes(d, times) != 0) return PosixResult(SceErrorFromErrno(errno));
+    return 0;
+}
+
+int APS5_VABI fsync_nid_postfix(int fd) {
+    if (sceKernelFsync(fd) != 0) return PosixFailure(errno);
     return 0;
 }
 

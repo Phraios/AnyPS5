@@ -98,6 +98,12 @@ constexpr std::uint32_t PixelInputVgpr(std::uint32_t inputAddr, PixelInput input
     return vgpr;
 }
 
+enum class ConservativeZExport : std::uint8_t {
+    AnyZ,
+    LessThanZ,
+    GreaterThanZ
+};
+
 struct ShaderPixelStageInfo {
     std::uint32_t interpolatorCount;
     std::array<std::uint32_t, 32> interpolatorSettings;
@@ -119,6 +125,7 @@ struct ShaderPixelStageInfo {
     bool sampleMaskExportEnable;
     bool earlyZ;
     bool executeOnNoop;
+    ConservativeZExport conservativeZExport;
     std::array<std::uint8_t, 8> targetOutputMode;
     std::array<std::uint8_t, 8> targetExportMapping;
 };

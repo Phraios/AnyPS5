@@ -10,6 +10,7 @@ int APS5_VABI sceHttpUriParse(SceHttpUriElement*, const char*, void*, std::size_
 int APS5_VABI sceHttpSetInflateGZIPEnabled(int, int);
 int APS5_VABI sceHttpUriBuild(char*, std::size_t*, std::size_t, const SceHttpUriElement*, std::uint32_t);
 int APS5_VABI sceHttpUriEscape(char*, std::size_t*, std::size_t, const char*);
+int APS5_VABI sceHttpUriUnescape(char*, std::size_t*, std::size_t, const char*);
 int APS5_VABI sceHttpCreateEpoll(int, HttpEpollHandle*);
 int APS5_VABI sceHttpDestroyEpoll(int, HttpEpollHandle);
 int APS5_VABI sceHttpReadData(int, void*, std::size_t);
@@ -89,6 +90,37 @@ int main() {
     Require(sceHttpUriEscape(escaped, nullptr, sizeof(escaped), "a b/~\xC3\xA9") == 0);
     Require(Equal(escaped, "a%20b%2F~%C3%A9"));
     Require(sceHttpUriEscape(escaped, nullptr, sizeof(escaped), nullptr) == invalidValue);
+
+    constexpr const char* unescapeCases[][2] = {
+        {"", ""}, {"plain+text", "plain+text"}, {"a%20b%2F~%c3%a9", "a b/~\xC3\xA9"},
+        {"%41%4a%4F%ff", "AJO\xFF"}, {"%2520", "%20"},
+        {"%", "%"}, {"%1", "%1"}, {"%1g%gg%+1%-1", "%1g%gg%+1%-1"}
+    };
+    for (const auto& row : unescapeCases) {
+        const std::size_t size = std::strlen(row[1]) + 1;
+        Require(sceHttpUriUnescape(nullptr, &required, 0, row[0]) == 0 && required == size);
+        std::memset(escaped, 'Z', sizeof(escaped));
+        Require(sceHttpUriUnescape(escaped, &required, size - 1, row[0]) == outOfMemory && required == size);
+        for (char c : escaped) Require(c == 'Z');
+        Require(sceHttpUriUnescape(escaped, nullptr, size, row[0]) == 0);
+        Require(Equal(escaped, row[1]) && escaped[size] == 'Z');
+    }
+    Require(sceHttpUriUnescape(escaped, &required, sizeof(escaped), "a%00b") == 0);
+    Require(required == 4 && std::memcmp(escaped, "a\0b", 4) == 0);
+    std::strcpy(escaped, "%41%2f%2520");
+    Require(sceHttpUriUnescape(escaped, &required, sizeof(escaped), escaped) == 0);
+    Require(Equal(escaped, "A/%20") && required == 6);
+    Require(sceHttpUriUnescape(nullptr, nullptr, 0, "valid") == 0);
+    required = 123;
+    Require(sceHttpUriUnescape(escaped, &required, sizeof(escaped), nullptr) == invalidValue);
+    Require(required == 123 && Equal(escaped, "A/%20"));
+
+    char bytes[256], encodedBytes[766], decodedBytes[256];
+    for (std::size_t i = 1; i < 256; ++i) bytes[i - 1] = static_cast<char>(i);
+    bytes[255] = '\0';
+    Require(sceHttpUriEscape(encodedBytes, nullptr, sizeof(encodedBytes), bytes) == 0);
+    Require(sceHttpUriUnescape(decodedBytes, &required, sizeof(decodedBytes), encodedBytes) == 0);
+    Require(required == sizeof(bytes) && std::memcmp(bytes, decodedBytes, sizeof(bytes)) == 0);
 
     HttpEpollHandle epoll = nullptr;
     Require(sceHttpCreateEpoll(1, nullptr) == invalidValue);

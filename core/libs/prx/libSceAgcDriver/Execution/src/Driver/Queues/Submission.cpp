@@ -50,6 +50,19 @@ bool Driver::copySegment(Submission& submission, const std::uint32_t* guest, std
             const bool chain = (guest[cursor + 3] & (1u << 20u)) != 0;
             require(!chain || guarded.empty(), "a chained INDIRECT_BUFFER inside a conditional execution range is not implemented");
             GuestMemory::CheckRange(target, targetWords * sizeof(std::uint32_t), alignof(std::uint32_t));
+            if (Pm4::Predicated(header)) {
+                require(!chain, "predicated command buffer chains are not implemented");
+                const auto start = submission.commands.size();
+                submission.commands.insert(submission.commands.end(), guest + cursor, guest + cursor + count);
+                require(!copySegment(submission, target, targetWords, budget), "a REWIND inside a predicated command buffer is not implemented");
+                for (auto inner = start + count; inner < submission.commands.size(); inner += Pm4::PacketWords(submission.commands[inner])) {
+                    const auto innerHeader = submission.commands[inner];
+                    require(innerHeader != FlipPacketHeader && innerHeader != RenderingWaitPacketHeader, "flips and rendering waits in predicated command buffers are not implemented");
+                }
+                submission.conditionalEnds.emplace(start, submission.commands.size());
+                cursor += count;
+                continue;
+            }
             if (copySegment(submission, target, targetWords, budget)) {
                 require(guarded.empty(), "a REWIND inside a conditional execution range is not implemented");
                 return true;

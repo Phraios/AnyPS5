@@ -70,7 +70,7 @@ static_assert(sizeof(FragmentParameter) == 12, "FragmentParameter changed: updat
 static_assert(sizeof(CompiledShaderInfo) == 304, "CompiledShaderInfo changed: update the info encoder");
 static_assert(sizeof(ShaderInfo) == 200, "ShaderInfo changed: update the info encoder");
 static_assert(sizeof(BufferResource) == 36, "BufferResource changed: update the info encoder");
-static_assert(sizeof(ImageResource) == 88, "ImageResource changed: update the info encoder");
+static_assert(sizeof(ImageResource) == 96, "ImageResource changed: update the info encoder");
 static_assert(sizeof(SamplerResource) == 12, "SamplerResource changed: update the info encoder");
 static_assert(sizeof(SampledResourcePair) == 12, "SampledResourcePair changed: update the info encoder");
 static_assert(sizeof(StageInput) == 56, "StageInput changed: update the info encoder");
@@ -80,7 +80,7 @@ static_assert(sizeof(IrDescriptorBinding) == 32, "IrDescriptorBinding changed: u
 static_assert(sizeof(BindingAllocationResult) == 120, "BindingAllocationResult changed: update the allocation encoder");
 static_assert(sizeof(ResourceSpecialization) == 72, "ResourceSpecialization changed: update BuildKey");
 static_assert(sizeof(ResourceSpecialization::Buffer) == 16, "ResourceSpecialization::Buffer changed: update BuildKey");
-static_assert(sizeof(ResourceSpecialization::Image) == 40, "ResourceSpecialization::Image changed: update BuildKey");
+static_assert(sizeof(ResourceSpecialization::Image) == 44, "ResourceSpecialization::Image changed: update BuildKey");
 static_assert(sizeof(BindingLayout) == 16, "BindingLayout changed: update BuildKey");
 #endif
 
@@ -408,6 +408,7 @@ void encodeInfo(Writer& writer, const CompiledShaderInfo& compiled) {
         out.Value(image.depthUnorm16);
         out.Value(image.packed);
         out.Value(image.packedFormat);
+        out.Value(image.emulatedCompare);
         out.Value(image.indirectRoot);
         out.Value(image.indirectMappingOffset);
         out.Value(image.indirectSearchIterations);
@@ -497,6 +498,7 @@ void decodeInfo(Reader& reader, CompiledShaderInfo& compiled) {
         in.Value(image.depthUnorm16);
         in.Value(image.packed);
         in.Value(image.packedFormat);
+        in.Value(image.emulatedCompare);
         in.Value(image.indirectRoot);
         in.Value(image.indirectMappingOffset);
         in.Value(image.indirectSearchIterations);
@@ -812,6 +814,7 @@ void BuildKey(const RecompileRequest& request, std::uint32_t hostSubgroupSize, c
         out.Value(image.depthBits);
         out.Value(image.depthUnorm16);
         out.Value(image.packedFormat);
+        out.Value(image.emulatedCompare);
     });
     writer.Values(std::span<const std::uint32_t>(specialization.boundDescriptors));
     const auto& switches = switchKey();

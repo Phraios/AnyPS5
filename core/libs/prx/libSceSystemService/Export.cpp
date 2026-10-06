@@ -96,8 +96,7 @@ int APS5_VABI sceSystemServiceParamGetString(int paramId, char* buf, size_t bufS
 }
 
 int APS5_VABI sceSystemServicePowerTick(void) {
- NotImplemented_nid_no_patch(__func__);
- return 0;
+ return SYSTEM_SERVICE_OK;
 }
 
 int APS5_VABI sceSystemServiceReceiveEvent(SystemServiceEvent* event) {
@@ -109,8 +108,7 @@ int APS5_VABI sceSystemServiceReceiveEvent(SystemServiceEvent* event) {
 
 int APS5_VABI sceSystemServiceReportAbnormalTermination(const void* info) {
  (void)info;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+ return SYSTEM_SERVICE_OK;
 }
 
 int APS5_VABI sceSystemServiceSetNoticeScreenSkipFlag(void) {
@@ -135,6 +133,31 @@ int APS5_VABI sceSystemServiceReenableMediaPlay() {
 int APS5_VABI sceSystemServiceLaunchPlayerDialog(const void* param) {
  if (param == nullptr) return SYSTEM_SERVICE_ERROR_PARAMETER;
  return SYSTEM_SERVICE_OK;
+}
+
+int APS5_VABI sceSystemServiceDisableMusicPlayer(void) {
+ NotImplemented_nid_no_patch(__func__);
+ return 0;
+}
+
+int APS5_VABI sceSystemServiceOpenChallengeActivity(void) {
+ NotImplemented_nid_no_patch(__func__);
+ return 0;
+}
+
+int APS5_VABI sceSystemServiceOpenTournamentOccurrence(void) {
+ NotImplemented_nid_no_patch(__func__);
+ return 0;
+}
+
+int APS5_VABI sceSystemServiceReenableMusicPlayer(void) {
+ NotImplemented_nid_no_patch(__func__);
+ return 0;
+}
+
+int APS5_VABI sceSystemServiceShowControllerSettings(void) {
+ NotImplemented_nid_no_patch(__func__);
+ return 0;
 }
 
 }

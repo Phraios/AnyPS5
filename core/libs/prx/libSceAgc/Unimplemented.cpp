@@ -55,17 +55,7 @@ int APS5_VABI sceAgcDebugRaiseException() {
  return 0;
 }
 
-int APS5_VABI sceAgcGetDataPacketPayloadRange() {
- NotImplemented_nid_no_patch(__func__);
- return 0;
-}
-
 int APS5_VABI sceAgcGetDefaultCxStateFlat() {
- NotImplemented_nid_no_patch(__func__);
- return 0;
-}
-
-int APS5_VABI sceAgcGetGsOversubscription() {
  NotImplemented_nid_no_patch(__func__);
  return 0;
 }
@@ -133,6 +123,12 @@ int APS5_VABI sceAgcWriteDataPatchSetDst() {
 }
 
 int APS5_VABI sceAgcAsyncWriteDataPatchSetCachePolicy() {
+ NotImplemented_nid_no_patch(__func__);
+ return 0;
+}
+
+APS5_EXPORT("vieBRwlh1Lw", sceAgcUnknown_vieBRwlh1Lw);
+int APS5_VABI sceAgcUnknown_vieBRwlh1Lw(void) {
  NotImplemented_nid_no_patch(__func__);
  return 0;
 }

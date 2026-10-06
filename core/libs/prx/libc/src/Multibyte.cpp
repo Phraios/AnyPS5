@@ -13,6 +13,8 @@ int APS5_VABI ___mb_cur_max_nid_postfix() {
     return 1;
 }
 
+int APS5_VABI _Getmbcurmax_nid_postfix() { return ___mb_cur_max_nid_postfix(); }
+
 int APS5_VABI mbsinit_nid_postfix(const void*) {
     return 1;
 }

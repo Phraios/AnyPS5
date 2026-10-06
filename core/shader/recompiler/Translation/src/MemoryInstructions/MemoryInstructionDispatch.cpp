@@ -40,6 +40,10 @@ bool TranslationContext::emitMemory(const RdnaInstruction& inst) {
     case RdnaOpcode::SBufferLoadDwordx8:
     case RdnaOpcode::SBufferLoadDwordx16:
         return sLoad(inst, false);
+    case RdnaOpcode::SScratchLoadDword:
+    case RdnaOpcode::SScratchLoadDwordx2:
+    case RdnaOpcode::SScratchLoadDwordx4:
+        return sScratchLoad(inst);
     case RdnaOpcode::SGetWaveidInWorkgroup: {
         if (program.Resources().stage != IrShaderStage::Compute) {
             throw std::runtime_error("s_get_waveid_in_workgroup is supported only in compute shaders, at pc " + std::to_string(inst.programCounter));
@@ -596,6 +600,8 @@ bool TranslationContext::emitMemory(const RdnaInstruction& inst) {
     case RdnaOpcode::ImageLoadMipPck:
     case RdnaOpcode::ImageLoadMipPckSgn:
         return imageLoad(inst);
+    case RdnaOpcode::ImageMsaaLoad:
+        return imageMsaaLoad(inst);
     case RdnaOpcode::ImageStore:
     case RdnaOpcode::ImageStoreMip:
     case RdnaOpcode::ImageStorePck:

@@ -93,6 +93,7 @@ static int CreateRack(Ngs2Handle systemHandle, std::uint32_t rackId, const RackO
     rack->system = system;
     rack->rackId = rackId;
     rack->maxChannels = RackMaxChannels(rackId, options);
+    rack->maxFilters = rackId == SCE_NGS2_RACK_ID_SAMPLER ? options.sampler.max_filters : 0;
     rack->bufferInfo = bufferInfo;
     rack->allocator = allocator;
     rack->voices.resize(options.common.max_voices);

@@ -180,7 +180,7 @@ void testAutoDraw() {
     }
     expectFailure([] { AgcDriver::Pm4::Validate(makePacket(0x2d, {3}), 0); }, "packet size");
     expectFailure([] { AgcDriver::Pm4::Validate(makePacket(0x2d, {3, 2, 0}), 0); }, "packet size");
-    expectFailure([] { AgcDriver::Pm4::Validate(makePacket(0x2d, {3, 2}, 1), 0); }, "header flags");
+    expectFailure([] { AgcDriver::Pm4::Validate(makePacket(0x2d, {3, 2}, 2), 0); }, "header flags");
     state.userConfig[0x24a] = std::numeric_limits<std::uint32_t>::max();
     check(AgcDriver::Pm4::ResolveDraw(makePacket(0x2d, {1, 2}), state).firstVertex == std::numeric_limits<std::uint32_t>::max(), "last vertex rejected");
     expectFailure([&] { AgcDriver::Pm4::ResolveDraw(makePacket(0x2d, {2, 2}), state); }, "vertex range overflow");
@@ -508,7 +508,7 @@ void testEventWrite() {
     for (const auto bit : {0x40u, 0x80u, 0x800u, 0x80000000u}) {
         expectFailure([&] { AgcDriver::Pm4::Validate(makePacket(0x46, {0x410u | bit}), 0); }, "reserved bits");
     }
-    expectFailure([] { AgcDriver::Pm4::Validate(makePacket(0x46, {0x410}, 1), 0); }, "header flags");
+    expectFailure([] { AgcDriver::Pm4::Validate(makePacket(0x46, {0x410}, 2), 0); }, "header flags");
     expectFailure([] { AgcDriver::Pm4::Validate(makePacket(0x46, {0x410, 0, 0}), 0); }, "packet size");
     expectFailure([] { AgcDriver::Pm4::Validate(makePacket(0x46, {0x13a, 0, 0}), 0); }, "event type 58");
     expectFailure([] { AgcDriver::Pm4::Validate(makePacket(0x46, {0x0d}), 0); }, "event type 13");
@@ -541,7 +541,7 @@ void testAcquireMem() {
         packet[index] = value;
         expectFailure([&] { AgcDriver::Pm4::Validate(packet, 0); }, reason);
     };
-    invalidWord(0, captured[0] | 1u, "header flags");
+    invalidWord(0, captured[0] | 2u, "header flags");
     invalidWord(1, 4, "control flags");
     invalidWord(1, 0x00800000, "control flags");
     invalidWord(3, 1, "above 40 bits");
@@ -552,6 +552,50 @@ void testAcquireMem() {
     expectFailure([] { AgcDriver::Pm4::Validate(makePacket(0x58, {0, 2, 0, 0xffffffff, 0, 0, 0}), 0); }, "range exceeds");
     expectFailure([] { AgcDriver::Pm4::Validate(makePacket(0x58, {0, 0, 0, 0, 0}), 0); }, "packet size");
     expectFailure([] { AgcDriver::Pm4::Validate(makePacket(0x58, {0, 0, 0, 0, 0, 0, 0, 0}), 0); }, "packet size");
+}
+
+void testPredication() {
+    alignas(16) std::uint64_t flag[4] = {0, 0, 0, 0};
+    auto* flag32 = reinterpret_cast<std::uint32_t*>(&flag[2]);
+    const auto setPredication = [&](std::uint32_t operation, bool executeWhenSet, const void* address) {
+        return makePacket(0x20, {(operation << 16u) | (executeWhenSet ? 0x100u : 0u) | 0x1000u, low(address), high(address)});
+    };
+    AgcDriver::QueueState state;
+    check(AgcDriver::Pm4::PredicationPasses(state), "inactive predication must pass");
+    execute(state, setPredication(3, true, &flag[0]));
+    check(state.predication.operation == 3 && state.predication.executeWhenSet && state.predication.address == reinterpret_cast<std::uintptr_t>(&flag[0]), "BOOL64 predication state mismatch");
+    check(!AgcDriver::Pm4::PredicationPasses(state), "zero BOOL64 value must skip draw-visible packets");
+    flag[0] = 1ull << 40u;
+    check(AgcDriver::Pm4::PredicationPasses(state), "upper BOOL64 bits must count");
+    execute(state, setPredication(3, false, &flag[0]));
+    check(!AgcDriver::Pm4::PredicationPasses(state), "non-zero BOOL64 value must skip draw-not-visible packets");
+    flag[0] = 0;
+    check(AgcDriver::Pm4::PredicationPasses(state), "zero BOOL64 value must run draw-not-visible packets");
+    execute(state, setPredication(4, true, &flag[2]));
+    flag[2] = 0xffffffff00000000ull;
+    check(*flag32 == 0 && !AgcDriver::Pm4::PredicationPasses(state), "BOOL32 must read only 32 bits");
+    *flag32 = 7;
+    check(AgcDriver::Pm4::PredicationPasses(state), "non-zero BOOL32 value must run draw-visible packets");
+    execute(state, setPredication(0, false, nullptr));
+    check(state.predication.operation == 0 && AgcDriver::Pm4::PredicationPasses(state), "clear must end predication");
+
+    expectFailure([&] { AgcDriver::Pm4::Validate(setPredication(1, true, &flag[0]), 0); }, "query predication");
+    expectFailure([&] { AgcDriver::Pm4::Validate(setPredication(2, true, &flag[0]), 0); }, "query predication");
+    expectFailure([&] { AgcDriver::Pm4::Validate(setPredication(5, true, &flag[0]), 0); }, "invalid predication operation");
+    expectFailure([&] { AgcDriver::Pm4::Validate(setPredication(3, true, &flag[0]), 0x20); }, "compute queue");
+    expectFailure([&] { AgcDriver::Pm4::Validate(setPredication(3, true, nullptr), 0); }, "unaligned predication address");
+    expectFailure([&] { AgcDriver::Pm4::Validate(setPredication(3, true, reinterpret_cast<const std::uint8_t*>(&flag[0]) + 8), 0); }, "unaligned predication address");
+    auto continued = setPredication(3, true, &flag[0]);
+    continued[1] |= 1u << 31u;
+    expectFailure([&] { AgcDriver::Pm4::Validate(continued, 0); }, "SET_PREDICATION bits");
+    expectFailure([&] { AgcDriver::Pm4::Validate(makePacket(0x20, {3u << 16u, low(&flag[0]), high(&flag[0])}, 1), 0); }, "header flags");
+
+    AgcDriver::Pm4::Validate(makePacket(0x2d, {3, 2}, 1), 0);
+    AgcDriver::Pm4::Validate(makePacket(0x46, {0x410}, 1), 0);
+    const auto call = makePacket(0x3f, {0x1000, 0, 0x0f200010}, 1);
+    AgcDriver::Pm4::Validate(call, 0);
+    expectFailure([&] { AgcDriver::Pm4::Validate(makePacket(0x3f, {0x1000, 0, 0x0f200010}), 0); }, "nested command buffers");
+    expectFailure([&] { AgcDriver::Pm4::Execute(call, state); }, "nested command buffers");
 }
 
 void testDriverSubmission() {
@@ -693,6 +737,49 @@ void testConditionalSubmission() {
     check(results[13] == 0, "a rejected conditional submission executed a guarded packet");
 }
 
+void testPredicatedSubmission() {
+    alignas(16) std::uint64_t flag[2] = {0, 0};
+    alignas(16) std::array<std::uint32_t, 4> written{};
+    alignas(16) std::array<std::uint32_t, 1> nestedWritten{};
+    const auto nested = makePacket(0x37, {0x100, low(nestedWritten.data()), high(nestedWritten.data()), 3});
+    const auto call = makePacket(0x3f, {low(nested.data()), high(nested.data()), 0x0f200000u | static_cast<std::uint32_t>(nested.size())}, 1);
+    const auto submit = [](std::vector<std::uint32_t>& commands) {
+        Packet packet{commands.data(), static_cast<std::uint32_t>(commands.size()), 0, {}};
+        check(sceAgcDriverSubmitDcb(&packet) == 0, "predicated submission failed");
+        AgcDriverWaitIdle_nid_postfix();
+    };
+    std::vector<std::uint32_t> commands;
+    for (const auto& packet : {
+        makePacket(0x20, {0x31100, low(&flag[0]), high(&flag[0])}),
+        makePacket(0x37, {0x100, low(&written[0]), high(&written[0]), 7}, 1),
+        call,
+        makePacket(0x20, {0, 0, 0}),
+        makePacket(0x37, {0x100, low(&written[1]), high(&written[1]), 9}, 1)
+    }) commands.insert(commands.end(), packet.begin(), packet.end());
+    submit(commands);
+    check(written[0] == 0, "packet with a false predicate was executed");
+    check(nestedWritten[0] == 0, "command buffer with a false predicate was executed");
+    check(written[1] == 9, "cleared predication skipped a packet");
+    flag[0] = 1;
+    commands.clear();
+    for (const auto& packet : {
+        makePacket(0x20, {0x31100, low(&flag[0]), high(&flag[0])}),
+        makePacket(0x37, {0x100, low(&written[2]), high(&written[2]), 5}, 1),
+        call,
+        makePacket(0x20, {0x31000, low(&flag[0]), high(&flag[0])}),
+        makePacket(0x37, {0x100, low(&written[3]), high(&written[3]), 6}, 1),
+        makePacket(0x20, {0, 0, 0})
+    }) commands.insert(commands.end(), packet.begin(), packet.end());
+    submit(commands);
+    check(written[2] == 5, "packet with a true predicate was skipped");
+    check(nestedWritten[0] == 3, "command buffer with a true predicate was skipped");
+    check(written[3] == 0, "draw-not-visible packet ran with a set value");
+    auto chain = makePacket(0x3f, {low(nested.data()), high(nested.data()), 0x0f300000u | static_cast<std::uint32_t>(nested.size())}, 1);
+    Packet chained{chain.data(), static_cast<std::uint32_t>(chain.size()), 0, {}};
+    expectFailure([&] { sceAgcDriverSubmitDcb(&chained); }, "predicated command buffer chains");
+    AgcDriverWaitIdle_nid_postfix();
+}
+
 void testAsyncMemoryFailure() {
     auto commands = makePacket(0x37, {0x100, 0x1000, 0, 1});
     Packet packet{commands.data(), static_cast<std::uint32_t>(commands.size()), 0, {}};
@@ -728,7 +815,9 @@ int main(int argc, char** argv) {
         testConditionReadSynchronization();
         testEventWrite();
         testAcquireMem();
+        testPredication();
         testDriverSubmission();
+        testPredicatedSubmission();
         testConditionalSubmission();
         LibcRunShutdown_nid_postfix();
         std::puts("PM4 catalog, registers, state, memory, conditional execution and submission tests passed");

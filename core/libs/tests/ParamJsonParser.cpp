@@ -24,6 +24,37 @@ static ParsedParamJson ParseSize(const std::filesystem::path& path, const std::s
     return parseParamJson(path);
 }
 
+static ParsedParamJson ParseText(const std::filesystem::path& path, const std::string& text) {
+    {
+        std::ofstream file(path, std::ios::binary);
+        file << text;
+        Require(static_cast<bool>(file), "Cannot write param.json fixture");
+    }
+    return parseParamJson(path);
+}
+
+static void CheckLanguages(const std::filesystem::path& path) {
+    const auto nested = ParseText(path, "{\r\n  \"localizedParameters\": {\r\n    \"defaultLanguage\": \"en-GB\",\r\n"
+                                        "    \"en-GB\": { \"titleName\": \"British\" }\r\n  },\r\n  \"titleId\": \"PPSA00001\"\r\n}\r\n");
+    Require(nested.title == "British" && nested.titleId == "PPSA00001", "Nested defaultLanguage without en-US");
+    const auto selected = ParseText(path, R"({"titleId":"PPSA00002","localizedParameters":{"defaultLanguage":"fr-FR",)"
+                                          R"("en-US":{"titleName":"American"},"fr-FR":{"titleName":"French"}}})");
+    Require(selected.title == "French", "Nested defaultLanguage not selected");
+    const auto american = ParseText(path, R"({"titleId":"PPSA00003","localizedParameters":{"defaultLanguage":"de-DE",)"
+                                          R"("ja-JP":{"titleName":"Japanese"},"en-US":{"titleName":"American"}}})");
+    Require(american.title == "American", "Missing defaultLanguage entry does not fall back to en-US");
+    const auto root = ParseText(path, R"({"titleId":"PPSA00004","defaultLanguage":"ja-JP","localizedParameters":{)"
+                                      R"("en-US":{"titleName":"American"},"ja-JP":{"titleName":"Japanese"}}})");
+    Require(root.title == "Japanese", "Root defaultLanguage not selected");
+    bool rejected = false;
+    try {
+        ParseText(path, R"({"titleId":"PPSA00005","localizedParameters":{"defaultLanguage":"en-GB"}})");
+    } catch (const std::exception&) {
+        rejected = true;
+    }
+    Require(rejected, "Accepted localizedParameters without a language entry");
+}
+
 int main() {
     const auto path = std::filesystem::temp_directory_path() / ("anyps5-param-json-" +
         std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".json");
@@ -47,6 +78,7 @@ int main() {
             try { ParseSize(path, text); } catch (const std::exception&) { rejected = true; }
             Require(rejected, std::string("Accepted invalid download size: ") + text);
         }
+        CheckLanguages(path);
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         result = 1;

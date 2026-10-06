@@ -261,6 +261,7 @@ enum class IrOpcode : std::uint16_t {
     FPRsq64,
     FPSqrt64,
     FPTrigPreop64,
+    FPDot2F32F16,
     ConvertF32F64,
     ConvertF64F32,
     ConvertF64S32,

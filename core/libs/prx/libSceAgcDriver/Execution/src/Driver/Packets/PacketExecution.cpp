@@ -1,3 +1,4 @@
+#include "prx/libSceAgcDriver/Execution/include/ProfileOutput.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Driver.hpp"
 #include "ThreadOwned.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Diagnostics.hpp"
@@ -24,7 +25,7 @@ void Driver::timed(double WorkerProfile::*bucket, TWork&& work) {
     static const bool report = std::getenv("APS5_PROFILE_DRAW") != nullptr;
     if (report && end - profile.reported > std::chrono::seconds(10)) {
         profile.reported = end;
-        std::fprintf(stderr, "[gpu] worker at %.0f s: dispatch %.1f s, draw %.1f s, wait %.1f s\n", std::chrono::duration<double>(end - profile.start).count(), profile.dispatchMs / 1000, profile.drawMs / 1000, profile.waitMs / 1000);
+        AgcDriver::ProfilePrint_nid_no_patch( "[gpu] worker at %.0f s: dispatch %.1f s, draw %.1f s, wait %.1f s\n", std::chrono::duration<double>(end - profile.start).count(), profile.dispatchMs / 1000, profile.drawMs / 1000, profile.waitMs / 1000);
     }
 }
 
@@ -117,6 +118,17 @@ void Driver::execute(const Submission& submission) {
 
         GuestMemory::SetCurrentPacket(header == FlipPacketHeader ? 0xffffu : opcode, submission.queue);
         CaptureTrace::Log("packet submission=%llu queue=%x offset=%zu header=%08x words=%zu", static_cast<unsigned long long>(submission.serial), submission.queue, cursor, header, packet.size());
+        if (Pm4::Predicated(header) && queue.predication.operation != 0) {
+            recordQueuedLabelsBeforeRead(submission.queue);
+            if (!Pm4::PredicationPasses(queue)) {
+                cursor = opcode == 0x3f ? submission.conditionalEnds.at(cursor) : nextCursor;
+                continue;
+            }
+        }
+        if (opcode == 0x3f) {
+            cursor = nextCursor;
+            continue;
+        }
 
         const auto flushStart = profilePackets ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
         flushBetweenPackets(submission.queue, header, opcode == 0x49 || opcode == 0x37);

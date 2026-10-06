@@ -10,6 +10,9 @@ int APS5_VABI sceMsgDialogUpdateStatus(void);
 int APS5_VABI sceMsgDialogGetResult(MsgDialogResult* result);
 int APS5_VABI sceMsgDialogClose(void);
 int APS5_VABI sceMsgDialogTerminate(void);
+int APS5_VABI sceMsgDialogProgressBarInc(int target, std::uint32_t delta);
+int APS5_VABI sceMsgDialogProgressBarSetMsg(int target, const char* msg);
+int APS5_VABI sceMsgDialogProgressBarSetValue(int target, std::uint32_t rate);
 }
 
 namespace {
@@ -33,8 +36,12 @@ int main() {
     Require(sceMsgDialogClose() == kErrNotRunning);
     Require(sceMsgDialogUpdateStatus() == kStatusInitialized);
 
+    Require(sceMsgDialogProgressBarSetValue(0, 50) == kErrNotRunning);
     Require(sceMsgDialogOpen(param) == 0);
     Require(sceMsgDialogUpdateStatus() == kStatusFinished);
+    Require(sceMsgDialogProgressBarInc(0, 10) == kErrNotRunning);
+    Require(sceMsgDialogProgressBarSetMsg(0, "progress") == kErrNotRunning);
+    Require(sceMsgDialogProgressBarSetValue(0, 100) == kErrNotRunning);
     Require(sceMsgDialogClose() == kErrNotRunning);
     Require(sceMsgDialogUpdateStatus() == kStatusFinished);
 
