@@ -1,6 +1,7 @@
 #include "SceTypes.hpp"
 #include "prx/libc/include/general/VabiMacros.hpp"
 
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -13,6 +14,7 @@ int APS5_VABI sceAudioOutOpen(int, int, int, std::uint32_t, std::uint32_t, std::
 int APS5_VABI sceAudioOutClose(int);
 int APS5_VABI sceAudioOutOutput(int, const void*);
 int APS5_VABI sceAudioOutOutputs(AudioOutOutputParam*, std::uint32_t);
+int APS5_VABI sceAudioOutGetPortState(int, AudioOutPortState*);
 int APS5_VABI sceAudioOutGetLastOutputTime(int, std::uint64_t*);
 std::uint64_t APS5_VABI sceKernelGetProcessTime();
 }
@@ -122,6 +124,21 @@ void TestReopenedPort() {
     Require(sceAudioOutClose(reopened) == 0, "port must close");
 }
 
+void TestPortWithoutDeviceKeepsRealTime() {
+    const std::vector<std::int16_t> block(frames, 256);
+    const int handle = Open(portTypeVibration);
+    const std::uint64_t blockUs = 1000000ull * frames / frequency;
+    const std::uint64_t start = sceKernelGetProcessTime();
+    for (int i = 0; i < 7; i++) Require(sceAudioOutOutput(handle, block.data()) == static_cast<int>(frames), "output must accept the block");
+    Require(sceKernelGetProcessTime() - start < 3 * blockUs, "a port without a device must take blocks up to its latency without waiting");
+    for (int i = 7; i < 60; i++) Require(sceAudioOutOutput(handle, block.data()) == static_cast<int>(frames), "output must accept the block");
+    const std::uint64_t elapsed = sceKernelGetProcessTime() - start;
+    Require(elapsed + 50000 >= 60 * blockUs && elapsed < 60 * blockUs + 200000, "a port without a device must consume blocks in real time");
+    Require(sceAudioOutOutput(handle, nullptr) == static_cast<int>(frames), "waiting for the output must succeed");
+    Require(sceKernelGetProcessTime() - start + 2000 >= 60 * blockUs, "waiting on a port without a device must last until its queue has played");
+    Require(sceAudioOutClose(handle) == 0, "port must close");
+}
+
 void TestErrors() {
     const std::vector<std::int16_t> block(frames, 256);
     const int handle = Open(portTypeMain);
@@ -139,6 +156,30 @@ void TestErrors() {
     Require(destination == untouched, "a rejected call must not write the destination");
 }
 
+void TestQueriesDuringOutput(bool batch, bool drain) {
+    const std::vector<std::int16_t> block(frequency, 256);
+    const int handle = sceAudioOutOpen(user, portTypeVibration, 0, frequency, frequency, formatS16Mono);
+    Require(handle > 0, "port must open");
+    Require(sceAudioOutOutput(handle, block.data()) == static_cast<int>(frequency), "output must accept the block");
+    const auto initialTime = LastOutputTime(handle);
+    std::atomic<bool> started = false;
+    std::thread output([&] {
+        AudioOutOutputParam param{handle, drain ? nullptr : block.data()};
+        started = true;
+        const int result = batch ? sceAudioOutOutputs(&param, 1) : sceAudioOutOutput(handle, param.ptr);
+        Require(result == static_cast<int>(frequency), "pending output must complete before close");
+    });
+    while (!started) std::this_thread::yield();
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    const auto before = std::chrono::steady_clock::now();
+    AudioOutPortState state{};
+    Require(sceAudioOutGetPortState(handle, &state) == 0, "pending output must allow port state queries");
+    Require(LastOutputTime(handle) == initialTime, "pending output must not change its timestamp yet");
+    Require(std::chrono::steady_clock::now() - before < std::chrono::milliseconds(300), "audio queries must not wait for output pacing or draining");
+    Require(sceAudioOutClose(handle) == 0, "close must safely wait for pending output");
+    output.join();
+}
+
 }
 
 int main() {
@@ -154,5 +195,10 @@ int main() {
     TestOutputs();
     TestReopenedPort();
     TestErrors();
+    TestPortWithoutDeviceKeepsRealTime();
+    TestQueriesDuringOutput(false, false);
+    TestQueriesDuringOutput(false, true);
+    TestQueriesDuringOutput(true, false);
+    TestQueriesDuringOutput(true, true);
     return 0;
 }

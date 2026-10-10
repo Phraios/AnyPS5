@@ -1,4 +1,6 @@
 #include "prx/libc/include/general/VabiMacros.hpp"
+#include <array>
+#include <cstdint>
 #include <cstring>
 #include <cstdio>
 #include <cstdlib>
@@ -6,6 +8,7 @@
 
 extern "C" {
 char* APS5_VABI basename_nid_postfix(const char*);
+char* APS5_VABI __inet_ntoa_nid_postfix(unsigned int);
 int* APS5_VABI __error_nid_postfix();
 std::size_t APS5_VABI strnlen_nid_postfix(const char*, std::size_t);
 std::size_t APS5_VABI strnlen_s_nid_postfix(const char*, std::size_t);
@@ -13,6 +16,7 @@ char* APS5_VABI strncat_nid_postfix(char*, const char*, std::size_t);
 char* APS5_VABI strpbrk_nid_postfix(const char*, const char*);
 std::size_t APS5_VABI strcspn_nid_postfix(const char*, const char*);
 std::size_t APS5_VABI strlcat_nid_postfix(char*, const char*, std::size_t);
+char* APS5_VABI stpcpy_nid_postfix(char*, const char*);
 char* APS5_VABI strtok_r_nid_postfix(char*, const char*, char**);
 char* APS5_VABI strtok_nid_postfix(char*, const char*);
 char* APS5_VABI strcasestr_nid_postfix(const char*, const char*);
@@ -25,6 +29,8 @@ int APS5_VABI memset_s_nid_postfix(void*, std::size_t, int, std::size_t);
 char* APS5_VABI strnstr_nid_postfix(const char*, const char*, std::size_t);
 int APS5_VABI snprintf_s_nid_postfix(char*, std::size_t, const char*, ...);
 int APS5_VABI sscanf_s_nid_postfix(const char*, const char*, ...);
+int APS5_VABI __inet_aton_nid_postfix(const char*, void*);
+std::uint32_t APS5_VABI __inet_addr_nid_postfix(const char*);
 }
 
 static void Require(bool condition) {
@@ -32,6 +38,33 @@ static void Require(bool condition) {
         std::fputs("Guest string check failed\n", stderr);
         std::abort();
     }
+}
+
+static bool CheckMemcpyOverlap() {
+    bool correct = true;
+    for (const auto offset : {0, 1, -1, 3, -3}) {
+        unsigned char bytes[16];
+        std::memset(bytes, 0x5a, sizeof(bytes));
+        auto* destination = bytes + 4;
+        const auto* source = destination + offset;
+        const int error = memcpy_s_nid_postfix(destination, 8, source, 4);
+        bool cleared = true;
+        for (unsigned i = 4; i < 12; ++i) cleared &= bytes[i] == 0;
+        const bool matches = error == 22 && cleared && bytes[3] == 0x5a && bytes[12] == 0x5a;
+        if (!matches) std::fprintf(stderr, "memcpy_s overlap %+d: expected EINVAL 22 and eight zero bytes, received %d\n", offset, error);
+        correct &= matches;
+    }
+    unsigned char adjacent[] = {1, 2, 3, 4, 5, 6, 7, 8};
+    Require(memcpy_s_nid_postfix(adjacent, 4, adjacent + 4, 4) == 0);
+    Require(std::memcmp(adjacent, adjacent + 4, 4) == 0);
+    const unsigned char original[] = {1, 2, 3, 4, 5, 6, 7, 8};
+    std::memcpy(adjacent, original, sizeof(adjacent));
+    Require(memcpy_s_nid_postfix(adjacent + 4, 4, adjacent, 4) == 0);
+    const unsigned char unchanged[] = {1, 2, 3, 4, 1, 2, 3, 4};
+    Require(std::memcmp(adjacent, unchanged, sizeof(adjacent)) == 0);
+    Require(memcpy_s_nid_postfix(adjacent, sizeof(adjacent), adjacent, 0) == 0);
+    Require(std::memcmp(adjacent, unchanged, sizeof(adjacent)) == 0);
+    return correct;
 }
 
 static void CheckBoundsCheckedFunctions() {
@@ -66,6 +99,11 @@ static void CheckSscanfS() {
     Require(sscanf_s_nid_postfix(" 12 abc x", "%d %s %c", &number, word, 4u, &letter, 1u) == 3 && number == 12 && std::strcmp(word, "abc") == 0 && letter == 'x');
     Require(sscanf_s_nid_postfix("12 abcd", "%d %s", &number, word, 4u) == 1 && word[0] == '\0');
     Require(sscanf_s_nid_postfix("key=val", "%3[a-z]=%3s", word, 4u, value, 8u) == 2 && std::strcmp(word, "key") == 0 && std::strcmp(value, "val") == 0);
+    Require(sscanf_s_nid_postfix("abcdef", "%3s", word, 4u) == 1 && std::strcmp(word, "abc") == 0);
+    Require(sscanf_s_nid_postfix("abcdef", "%3s", value, 8u) == 1 && std::strcmp(value, "abc") == 0);
+    Require(sscanf_s_nid_postfix("abcdef", "%3[a-z]", value, 8u) == 1 && std::strcmp(value, "abc") == 0);
+    Require(sscanf_s_nid_postfix("2024ABCD 7", "%4s%s", word, 4u, value, 8u) == 0 && word[0] == '\0');
+    Require(sscanf_s_nid_postfix("2024ABCD", "%3s%4s", word, 4u, value, 8u) == 2 && std::strcmp(word, "202") == 0 && std::strcmp(value, "4ABC") == 0);
     int position = 0;
     Require(sscanf_s_nid_postfix("7 %", "%d %%%n", &number, &position) == 1 && position == 3);
     Require(sscanf_s_nid_postfix("   ", "%d", &number) == EOF);
@@ -85,6 +123,21 @@ int main() {
     Require(std::strcmp(basename_nid_postfix("one\\two"), "one\\two") == 0);
     const std::string longName(1024, 'x');
     Require(basename_nid_postfix(longName.c_str()) == nullptr && *__error_nid_postfix() == 63);
+    const unsigned char loopbackBytes[4] = {127, 0, 0, 1};
+    unsigned int loopback;
+    std::memcpy(&loopback, loopbackBytes, sizeof(loopback));
+    char* const dotted = __inet_ntoa_nid_postfix(loopback);
+    Require(std::strcmp(dotted, "127.0.0.1") == 0);
+    Require(__inet_ntoa_nid_postfix(0xffffffffu) == dotted && std::strcmp(dotted, "255.255.255.255") == 0);
+    Require(std::strcmp(__inet_ntoa_nid_postfix(0), "0.0.0.0") == 0);
+    const unsigned char mixedBytes[4] = {10, 200, 3, 45};
+    unsigned int mixed;
+    std::memcpy(&mixed, mixedBytes, sizeof(mixed));
+    Require(std::strcmp(__inet_ntoa_nid_postfix(mixed), "10.200.3.45") == 0);
+    const unsigned char paddingBytes[4] = {100, 9, 99, 0};
+    unsigned int padding;
+    std::memcpy(&padding, paddingBytes, sizeof(padding));
+    Require(std::strcmp(__inet_ntoa_nid_postfix(padding), "100.9.99.0") == 0);
     const char bounded[] = {'a', 'b', 'c'};
     Require(strnlen_nid_postfix(bounded, 0) == 0);
     Require(strnlen_nid_postfix(bounded, sizeof(bounded)) == 3);
@@ -100,11 +153,53 @@ int main() {
     Require(strlcat_nid_postfix(buffer, "xyz", 0) == 3);
     buffer[0] = '\0';
     Require(strlcat_nid_postfix(buffer, "x", 1) == 1 && buffer[0] == '\0');
+    char chained[8] = "zzzzzzz";
+    char* end = stpcpy_nid_postfix(chained, "ab");
+    Require(end == chained + 2 && *end == '\0' && chained[3] == 'z');
+    end = stpcpy_nid_postfix(end, "cd");
+    Require(end == chained + 4 && std::strcmp(chained, "abcd") == 0);
+    Require(stpcpy_nid_postfix(end, "") == end && chained[5] == 'z');
     Require(strncat_nid_postfix(buffer, "xyz", 2) == buffer);
     Require(std::strcmp(buffer, "xy") == 0);
     Require(strpbrk_nid_postfix(buffer, "ay") == buffer + 1);
     Require(strpbrk_nid_postfix(buffer, "") == nullptr);
     Require(strcspn_nid_postfix(buffer, "y") == 1);
+    const auto inetAton = [](const char* text, const char* expected) {
+        unsigned char address[4] = {0xA5, 0xA5, 0xA5, 0xA5};
+        if (__inet_aton_nid_postfix(text, address) != 1) return false;
+        char formatted[16];
+        std::snprintf(formatted, sizeof(formatted), "%u.%u.%u.%u", address[0], address[1], address[2], address[3]);
+        return std::strcmp(formatted, expected) == 0;
+    };
+    Require(inetAton("192.0.2.42", "192.0.2.42"));
+    Require(inetAton("10.1.2", "10.1.0.2"));
+    Require(inetAton("127.1", "127.0.0.1"));
+    Require(inetAton("3232235777", "192.168.1.1"));
+    Require(inetAton("0x7f.0.0.0x1", "127.0.0.1"));
+    Require(inetAton("0377.0.0.010", "255.0.0.8"));
+    Require(inetAton("1.2.3.4 trailing", "1.2.3.4"));
+    Require(inetAton("1.2.3.4\n", "1.2.3.4"));
+    Require(__inet_aton_nid_postfix("1.2.3.4", nullptr) == 1);
+    for (const char* invalid : {"", " 1.2.3.4", "1.2.3.4.5", "256.1.1.1", "1.2.3.256", "1.2.65536", "08", "1..2", "a.b.c.d",
+             "1.2.3.4x", "0x", "1.2.3.", "-1"}) {
+        unsigned char address[4] = {0xA5, 0xA5, 0xA5, 0xA5};
+        Require(__inet_aton_nid_postfix(invalid, address) == 0);
+        Require(address[0] == 0xA5 && address[3] == 0xA5);
+        Require(__inet_addr_nid_postfix(invalid) == 0xffffffff);
+    }
+    const auto inetAddr = [](const char* text, std::array<unsigned char, 4> expected) {
+        const std::uint32_t value = __inet_addr_nid_postfix(text);
+        std::array<unsigned char, 4> bytes{};
+        std::memcpy(bytes.data(), &value, sizeof(value));
+        return bytes == expected;
+    };
+    Require(inetAddr("192.0.2.42", {192, 0, 2, 42}));
+    Require(inetAddr("127.1", {127, 0, 0, 1}));
+    Require(inetAddr("0x7f.0.0.0x1", {127, 0, 0, 1}));
+    Require(inetAddr("0.0.0.0", {0, 0, 0, 0}));
+    Require(inetAddr("255.255.255.255", {255, 255, 255, 255}));
+    Require(inetAddr("4294967296", {0, 0, 0, 0}));
+    Require(inetAddr("18446744073709551617", {0, 0, 0, 1}));
     char first[] = ",a,,b,";
     char second[] = "x:y";
     char* firstState = nullptr;
@@ -131,4 +226,5 @@ int main() {
     Require(strcasestr_nid_postfix("", "a") == nullptr);
     const char highBytes[] = {static_cast<char>(0xff), 'A', 0};
     Require(strcasestr_nid_postfix(highBytes, "a") == highBytes + 1);
+    return CheckMemcpyOverlap() ? 0 : 1;
 }

@@ -23,15 +23,20 @@ static constexpr std::uint64_t ATTRIBUTE_TRACE_EVERY = 2000;
 // 8 and 9 (a u32, a u32 and a byte on object and voice ports) are not understood and ignored.
 static constexpr std::uint32_t ATTRIBUTE_DATA = 0;
 static constexpr std::uint32_t ATTRIBUTE_VOLUME = 1;
+static constexpr std::size_t QUEUED_DATA_MAX = 16;
 
 static constexpr std::uint32_t FORMAT_CHANNELS_SHIFT = 8;
 static constexpr std::uint32_t FORMAT_CHANNELS_MASK = 0xFu;
 static constexpr std::uint32_t FORMAT_TYPE_MASK = 0x7Fu;
 static constexpr std::uint32_t FORMAT_FIELDS_MASK = 0xFFFu;
+static constexpr std::uint16_t PORT_TYPE_MAIN = 0;
+static constexpr int PORT_ERROR_FORMAT_FLAG_WITHOUT_8_CHANNELS = static_cast<int>(0x80268001);
+static constexpr int PORT_ERROR_UNSUPPORTED_FORMAT = static_cast<int>(0x8026800E);
 
 static std::mutex g_portsLock;
 // Grows on demand: the title opens its bed ports plus max_object_ports object ports at once.
 static std::vector<AudioOut2Port> g_ports;
+static std::uint64_t g_portGeneration = 0;
 
 static AudioOut2Port* FromHandle(AudioOut2PortHandle handle) {
     const auto index = handle - 1;
@@ -62,26 +67,26 @@ static const AudioOut2StereoFold* StereoFoldFor(std::uint32_t channels) {
     return found == std::end(STEREO_FOLDS) ? nullptr : found;
 }
 
-static void ReadFrame(const AudioOut2Port& port, std::uint32_t frame, float* in) {
+static void ReadFrame(const AudioOut2Port& port, const void* data, std::uint32_t frame, float* in) {
     const auto first = static_cast<std::size_t>(frame) * port.channels;
     for (std::uint32_t c = 0; c < port.channels; c++) {
-        in[c] = port.int16 ? static_cast<const std::int16_t*>(port.data)[first + c] / 32768.0f : static_cast<const float*>(port.data)[first + c];
+        in[c] = port.int16 ? static_cast<const std::int16_t*>(data)[first + c] / 32768.0f : static_cast<const float*>(data)[first + c];
     }
 }
 
-static void AccumulatePadPort(const AudioOut2Port& port, AudioOut2Route route, float* out, std::uint32_t frames) {
+static void AccumulatePadPort(const AudioOut2Port& port, const void* data, AudioOut2Route route, float* out, std::uint32_t frames) {
     float in[AUDIO_OUT2_PORT_CHANNELS_MAX];
     for (std::uint32_t frame = 0; frame < frames; frame++) {
-        ReadFrame(port, frame, in);
+        ReadFrame(port, data, frame, in);
         AudioOut2AccumulatePadFrame(route, in, port.channels, port.volume, out + static_cast<std::size_t>(frame) * AUDIO_OUT2_PAD_CHANNELS);
     }
 }
 
-static void AccumulatePort(const AudioOut2Port& port, float* out, std::uint32_t frames) {
+static void AccumulatePort(const AudioOut2Port& port, const void* data, float* out, std::uint32_t frames) {
     const auto& fold = *port.fold;
     float in[AUDIO_OUT2_PORT_CHANNELS_MAX];
     for (std::uint32_t frame = 0; frame < frames; frame++) {
-        ReadFrame(port, frame, in);
+        ReadFrame(port, data, frame, in);
         float left = 0.0f;
         float right = 0.0f;
         for (std::uint32_t c = 0; c < port.channels; c++) {
@@ -94,14 +99,36 @@ static void AccumulatePort(const AudioOut2Port& port, float* out, std::uint32_t 
     }
 }
 
-std::uint32_t AudioOut2MixPorts(const AudioOut2Context& context, float* out, float* padOut, std::uint32_t frames) {
+AudioOut2Grain AudioOut2CaptureGrain(const AudioOut2Context& context) {
+    std::lock_guard lock(g_portsLock);
+    AudioOut2Grain grain;
+    for (std::size_t index = 0; index < g_ports.size(); index++) {
+        auto& port = g_ports[index];
+        if (!port.used || port.context != &context || port.channels == 0) continue;
+        const void* data = port.repeatedData;
+        if (!port.queuedData.empty()) {
+            data = port.queuedData.front();
+            port.queuedData.pop_front();
+        }
+        if (data != nullptr) grain.push_back({index, port.generation, data});
+    }
+    return grain;
+}
+
+std::uint32_t AudioOut2MixPorts(const AudioOut2Context& context, const AudioOut2Grain& grain, float* out, float* padOut, std::uint32_t frames) {
     std::lock_guard lock(g_portsLock);
     std::uint32_t mixed = 0;
-    for (const auto& port : g_ports) {
-        if (!port.used || port.context != &context || port.data == nullptr || port.channels == 0) continue;
-        const auto route = padOut != nullptr ? AudioOut2RouteForPort(port.type, port.channels) : AudioOut2Route::Main;
-        if (route == AudioOut2Route::Main) AccumulatePort(port, out, frames);
-        else AccumulatePadPort(port, route, padOut, frames);
+    for (const auto& [index, generation, data] : grain) {
+        if (index >= g_ports.size()) continue;
+        const auto& port = g_ports[index];
+        if (!port.used || port.generation != generation || port.context != &context || port.channels == 0) continue;
+        auto route = AudioOut2RouteForPort(port.type, port.channels);
+        if (padOut == nullptr) {
+            if (route == AudioOut2Route::PadVibration) continue;
+            route = AudioOut2Route::Main;
+        }
+        if (route == AudioOut2Route::Main) AccumulatePort(port, data, out, frames);
+        else AccumulatePadPort(port, data, route, padOut, frames);
         mixed++;
     }
     return mixed;
@@ -145,6 +172,19 @@ extern "C" {
 int APS5_VABI sceAudioOut2PortCreate(AudioOut2ContextHandle ctx, const AudioOut2PortParam* params, AudioOut2PortHandle* port) {
     if (!ctx) return SCE_AUDIO_OUT2_ERROR_INVALID_HANDLE;
     if (!params || !port) return SCE_AUDIO_OUT2_ERROR_INVALID_ARGUMENT;
+    const auto channels = (params->data_format >> FORMAT_CHANNELS_SHIFT) & FORMAT_CHANNELS_MASK;
+    const auto sampleType = params->data_format & FORMAT_TYPE_MASK;
+    const auto* fold = StereoFoldFor(channels);
+    if (params->port_type == PORT_TYPE_MAIN) {
+        if ((params->data_format & 0x80u) != 0 && channels != 8) {
+            *port = static_cast<AudioOut2PortHandle>(-1);
+            return PORT_ERROR_FORMAT_FLAG_WITHOUT_8_CHANNELS;
+        }
+        if (fold == nullptr || channels == 6 || sampleType > 1) {
+            *port = static_cast<AudioOut2PortHandle>(-1);
+            return PORT_ERROR_UNSUPPORTED_FORMAT;
+        }
+    }
     std::lock_guard lock(g_portsLock);
     std::size_t index = 0;
     while (index < g_ports.size() && g_ports[index].used) index++;
@@ -152,15 +192,15 @@ int APS5_VABI sceAudioOut2PortCreate(AudioOut2ContextHandle ctx, const AudioOut2
     auto& entry = g_ports[index];
     entry = AudioOut2Port{};
     entry.used = true;
+    entry.generation = ++g_portGeneration;
     entry.context = reinterpret_cast<AudioOut2Context*>(ctx);
     entry.type = params->port_type;
     entry.dataFormat = params->data_format;
     entry.samplingFreq = params->sampling_freq;
     entry.flags = params->flags;
-    entry.channels = (params->data_format >> FORMAT_CHANNELS_SHIFT) & FORMAT_CHANNELS_MASK;
-    const auto sampleType = params->data_format & FORMAT_TYPE_MASK;
-    entry.fold = StereoFoldFor(entry.channels);
-    if (entry.fold == nullptr || sampleType > 1 || (params->data_format & ~FORMAT_FIELDS_MASK) != 0) {
+    entry.channels = channels;
+    entry.fold = fold;
+    if (entry.fold == nullptr || sampleType > 1 || (params->port_type != PORT_TYPE_MAIN && (params->data_format & ~FORMAT_FIELDS_MASK) != 0)) {
         entry = AudioOut2Port{};
         throw std::runtime_error("sceAudioOut2PortCreate: data format 0x" + [&] { char text[16]; std::snprintf(text, sizeof(text), "%x", params->data_format); return std::string(text); }() + " is not implemented");
     }
@@ -205,6 +245,10 @@ int APS5_VABI sceAudioOut2PortSetAttributes(AudioOut2PortHandle port, const Audi
             verdict = "null value";
         } else if (attribute.attribute_id == ATTRIBUTE_DATA && attribute.value_size == sizeof(entry->data)) {
             std::memcpy(&entry->data, attribute.value, sizeof(entry->data));
+            entry->queuedData.push_back(entry->data);
+            if (entry->queuedData.size() > QUEUED_DATA_MAX) entry->queuedData.pop_front();
+            entry->repeatedData = entry->data != nullptr && (entry->lastBuffer == nullptr || entry->lastBuffer == entry->data) ? entry->data : nullptr;
+            if (entry->data != nullptr) entry->lastBuffer = entry->data;
             entry->dataSets++;
             verdict = "pcm data pointer";
         } else if (attribute.attribute_id == ATTRIBUTE_VOLUME && entry->channels != 0 && attribute.value_size == entry->channels * sizeof(float)) {

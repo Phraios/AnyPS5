@@ -18,7 +18,8 @@ bool Driver::preparePacketMemory(const Submission& submission, QueueState& queue
 
     bool orderedAlready = false;
 
-    endOfPipeInterrupt = opcode == 0x49 && ((packet[2] >> 24u) & 7u) != 0;
+    const auto interruptSelect = opcode == 0x49 ? (packet[2] >> 24u) & 7u : 0u;
+    endOfPipeInterrupt = interruptSelect != 0 && interruptSelect != 3;
     interruptDeferred = false;
     if (!drainAll && endOfPipeInterrupt) {
         const auto label = Pm4::DecodeLabelWrite(packet);
@@ -36,8 +37,8 @@ bool Driver::preparePacketMemory(const Submission& submission, QueueState& queue
                 const auto stamp = ++eventSerial;
                 reason = localDevice != nullptr ? localDevice->WriteLabelOnGpu(label->address, bytes, stamp, submission.queue) : 4;
                 if (reason == 1) GuestMemory::Write(label->address, bytes, 4);
-                if (reason == 0 || reason == 1 || reason == 5 || reason == 6) {
-                    noteLabelStore(label->address, bytes, stamp);
+                if (reason == 0 || reason == 1 || reason == 5) {
+                    noteLabelStore(label->address, bytes, stamp, submission.queue);
                     Graphics::Recorder::CloseLabelGroup(GuestMemory::TrackerGeneration());
                 }
                 countLabelOutcome(reason);
@@ -45,7 +46,7 @@ bool Driver::preparePacketMemory(const Submission& submission, QueueState& queue
             } else {
                 ++noOpLabels;
             }
-            if (reason == 0 || reason == 5 || reason == 6) {
+            if (reason == 0 || reason == 5) {
                 const auto queueId = submission.queue;
                 interruptDeferred = localDevice->AfterRecordedWork([queueId] { AgcDriverDeliverEopInterrupt(queueId); }, submission.queue == 0);
                 if (interruptDeferred && workOpen) localDevice->SubmitRecorded(submission.queue == 0);
@@ -76,13 +77,13 @@ bool Driver::preparePacketMemory(const Submission& submission, QueueState& queue
                 recordDeferredLabels(localDevice.get(), submission.queue);
                 const auto stamp = ++eventSerial;
                 const auto reason = localDevice != nullptr ? localDevice->WriteLabelOnGpu(label->address, bytes, stamp, submission.queue) : 4;
-                wroteOnGpu = reason == 0 || reason == 5 || reason == 6;
+                wroteOnGpu = reason == 0 || reason == 5;
                 if (reason == 1) {
 
                     GuestMemory::Write(label->address, bytes, 4);
                     wroteOnGpu = true;
                 }
-                if (wroteOnGpu) noteLabelStore(label->address, bytes, stamp);
+                if (wroteOnGpu) noteLabelStore(label->address, bytes, stamp, submission.queue);
                 Graphics::Recorder::CloseLabelGroup(GuestMemory::TrackerGeneration());
                 countLabelOutcome(reason);
                 ++immediateLabels;
@@ -116,8 +117,8 @@ bool Driver::preparePacketMemory(const Submission& submission, QueueState& queue
                 recordDeferredLabels(localDevice.get(), submission.queue);
                 const auto stamp = ++eventSerial;
                 const auto reason = localDevice != nullptr ? localDevice->WriteLabelOnGpu(store->address, bytes, stamp, submission.queue) : 4;
-                if (reason == 0 || reason == 1 || reason == 5 || reason == 6) noteLabelStore(store->address, bytes, stamp);
-                if (reason == 0 || reason == 5 || reason == 6) {
+                if (reason == 0 || reason == 1 || reason == 5) noteLabelStore(store->address, bytes, stamp, submission.queue);
+                if (reason == 0 || reason == 5) {
                     if (reason == 0) ++storesOnGpu;
                     else ++storesBehindCompletions;
                     wroteOnGpu = true;
@@ -163,7 +164,7 @@ bool Driver::preparePacketMemory(const Submission& submission, QueueState& queue
 
     static const bool syncFlip = std::getenv("APS5_SYNC_FLIP") != nullptr;
     const bool drains = drainAll ? ((Pm4::AccessesMemory(header) && opcode != 0x16) || opcode == 0x42 || opcode == 0x46 || opcode == 0x58 || header == FlipPacketHeader)
-                                 : (!wroteOnGpu && !orderedAlready && (opcode == 0x49 || opcode == 0x37 || opcode == 0x40 || opcode == 0x50 || opcode == 0x83 || sampleDump || (drawPacket && drawDrain) || (header == FlipPacketHeader && syncFlip)));
+                                 : (!wroteOnGpu && !orderedAlready && (opcode == 0x49 || opcode == 0x37 || opcode == 0x40 || opcode == 0x45 || opcode == 0x50 || opcode == 0x83 || sampleDump || (drawPacket && drawDrain) || (header == FlipPacketHeader && syncFlip)));
     if (drains) {
 
         static const bool unlockedDrain = std::getenv("APS5_NO_UNLOCKED_DRAIN") == nullptr && !drainAll;

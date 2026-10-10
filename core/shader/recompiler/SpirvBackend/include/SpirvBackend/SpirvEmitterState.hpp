@@ -7,6 +7,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <map>
 #include <span>
 #include <string_view>
 #include <unordered_map>
@@ -68,9 +69,12 @@ struct MemoryResourceAccess {
     std::uint32_t byteOffset = 0;
     bool addIndexOffset = false;
     std::uint32_t memoryAccess = 0;
+    std::uint32_t misalignment = 0;
 };
 
 struct SpirvEmitterState {
+    const ImageResource* runtimeImage = nullptr;
+    std::uint32_t runtimeImageMetadata = 0u;
     SpirvEmitterState(const IrProgram& program, const ShaderStageInputInfo& inputInfo);
 
     SpirvModule module;
@@ -82,7 +86,9 @@ struct SpirvEmitterState {
 
     SpirvRequirements requirements;
     std::uint32_t laneCount = 1;
+    std::uint32_t hostSubgroupSize = 0;
     bool splitSubgroup = false;
+    bool narrowSubgroupClock = false;
     std::unordered_set<const IrValue*> sharedLaneValues;
     std::uint32_t laneHalf = 0;
     // The target's SPIR-V version and what the device accepts, for capabilities an emitter adds
@@ -96,7 +102,9 @@ struct SpirvEmitterState {
     bool tableIndexNonUniform = true;
     std::uint32_t storageBufferVariable = 0;
     std::uint32_t storageBufferU64Variable = 0;
-    std::array<std::uint32_t, ShaderInfo::MaxBuffers> memoryByteOffsets {};
+    std::vector<std::uint32_t> memoryByteOffsets;
+    std::map<std::array<std::uint32_t, 6>, std::uint32_t> formattedBufferFunctions;
+    std::map<std::array<std::uint32_t, 6>, std::uint32_t> formattedGpuBufferFunctions;
     std::uint32_t bdaPagetableVariable = 0;
     std::uint32_t faultBufferVariable = 0;
     std::uint32_t bdaPointerFunction = 0;
@@ -104,9 +112,19 @@ struct SpirvEmitterState {
     // every read takes the byte path.
     std::uint32_t bdaProbeFunction = 0;
     std::uint32_t bdaWritePointerFunction = 0;
+    std::uint32_t bdaWriteProbeFunction = 0;
+    std::uint32_t bdaAtomicPointerFunction = 0;
     std::uint32_t bdaNoteWriteFunction = 0;
+    std::array<std::uint32_t, 2> bdaByteWriteFunctions {};
+    std::uint32_t bdaFaultFunction = 0;
+    bool nativeF16ModesEmitted = false;
+    std::array<std::array<std::uint32_t, 2>, 2> bdaDwordReadFunctions {};
+    std::array<std::array<std::uint32_t, 2>, 2> bdaSpanReadFunctions {};
+    std::uint32_t bdaStopValue = 0;
+    std::uint32_t bdaPcOverride = 0;
     // False for programs with workgroup barriers: faulting BDA accesses then continue (see BdaInvocationsMayStop).
     bool bdaStopsInvocations = true;
+    bool continueTarget = false;
     // Execution scope of the barriers that keep one guest wave's LDS accesses in program order across
     // host invocations (see WaveLdsScope); 0 when none are emitted.
     std::uint32_t waveLdsScope = 0;
@@ -115,12 +133,16 @@ struct SpirvEmitterState {
     std::uint32_t loopGuardLimit = 0;
     std::uint32_t loopGuardVisits = 0;
     std::uint32_t loopGuardPc = 0;
+    std::uint32_t srgbTableVariable = 0;
     std::uint32_t gdsVariable = 0;
     std::uint32_t gdsLength = 0;
     std::uint32_t pushConstantVariable = 0;
     std::uint32_t shaderDataStorageVariable = 0;
     std::uint32_t flattenedSrtVariable = 0;
     std::uint32_t ldsVariable = 0;
+    std::uint32_t ldsBufferVariable = 0;
+    std::uint32_t ldsBufferBase = 0;
+    std::uint32_t numWorkgroupsVariable = 0;
     std::array<std::uint32_t, 2> scratchVariable {};
     std::array<std::uint32_t, ImageBindingCount> imageVariables {};
     std::uint32_t samplerVariable = 0;

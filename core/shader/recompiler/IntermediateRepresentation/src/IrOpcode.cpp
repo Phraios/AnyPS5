@@ -303,6 +303,8 @@ constexpr std::array<OpcodeMeta, static_cast<std::size_t>(IrOpcode::Count)> Meta
     makeMeta("FPSqrt64", U64, U64),
     makeMeta("FPTrigPreop64", U64, U64, U32),
     makeMeta("FPDot2F32F16", U32, U32, U32, U32),
+    makeMeta("FPInterpolateF32", F32, F32, F32, F32, U32),
+    makeMeta("FPInterpolateF16", F32, F32, F32, F32, U32),
     makeMeta("ConvertF32F64", F32, U64),
     makeMeta("ConvertF64F32", U64, F32),
     makeMeta("ConvertF64S32", U64, U32),
@@ -332,6 +334,9 @@ constexpr std::array<OpcodeMeta, static_cast<std::size_t>(IrOpcode::Count)> Meta
     makeMeta("StoreAddressU8", Void, AddressResource, U32, U32, U8, U1),
     makeMeta("StoreAddressU16", Void, AddressResource, U32, U32, U16, U1),
     makeMeta("StoreAddressU32", Void, AddressResource, U32, U32, U32, U1),
+    makeMeta("StoreAddressU32x2", Void, AddressResource, U32, U32, U32x2, U1),
+    makeMeta("StoreAddressU32x3", Void, AddressResource, U32, U32, U32x3, U1),
+    makeMeta("StoreAddressU32x4", Void, AddressResource, U32, U32, U32x4, U1),
     makeMeta("AddressAtomicSwap32", U32, AddressResource, U32, U32, U32, U1),
     makeMeta("AddressAtomicCmpSwap32", U32, AddressResource, U32, U32, U32, U32, U1),
     makeMeta("AddressAtomicIAdd32", U32, AddressResource, U32, U32, U32, U1),
@@ -485,8 +490,22 @@ constexpr std::array<OpcodeMeta, static_cast<std::size_t>(IrOpcode::Count)> Meta
     makeMeta("ImageAtomicFCmpSwap32", U32, ImageResource, ImageAddress, U32, U32, U1),
     makeMeta("ImageAtomicFMin32", U32, ImageResource, ImageAddress, U32, U1),
     makeMeta("ImageAtomicFMax32", U32, ImageResource, ImageAddress, U32, U1),
+    makeMeta("ImageAtomicSwap64", U64, ImageResource, ImageAddress, U64, U1),
+    makeMeta("ImageAtomicIAdd64", U64, ImageResource, ImageAddress, U64, U1),
+    makeMeta("ImageAtomicISub64", U64, ImageResource, ImageAddress, U64, U1),
+    makeMeta("ImageAtomicUMin64", U64, ImageResource, ImageAddress, U64, U1),
+    makeMeta("ImageAtomicUMax64", U64, ImageResource, ImageAddress, U64, U1),
+    makeMeta("ImageAtomicSMin64", U64, ImageResource, ImageAddress, U64, U1),
+    makeMeta("ImageAtomicSMax64", U64, ImageResource, ImageAddress, U64, U1),
+    makeMeta("ImageAtomicAnd64", U64, ImageResource, ImageAddress, U64, U1),
+    makeMeta("ImageAtomicOr64", U64, ImageResource, ImageAddress, U64, U1),
+    makeMeta("ImageAtomicXor64", U64, ImageResource, ImageAddress, U64, U1),
+    makeMeta("ImageAtomicCmpSwap64", U64, ImageResource, ImageAddress, U64, U64, U1),
     makeMeta("GetAttribute", U32, U32, U32),
     makeMeta("GetInterpolationParameter", U32, U32, U32, U32),
+    makeMeta("GetInterpolationParameterF16", F32, U32, U32, U32, U32),
+    makeMeta("InterpolateHostP1", F32, U32, U32, F32),
+    makeMeta("InterpolateHostP2", Void, U32, U32, F32, F32, U1),
     makeMeta("SetAttribute", Void, U32x4, U1),
     makeMeta("ControlNop", Void),
     makeMeta("Waitcnt", Void),
@@ -733,6 +752,12 @@ AddressOpcodeInfo AddressOpcodeInfoOf(IrOpcode opcode) {
             return {AddressAccess::Write, 16u};
         case IrOpcode::StoreAddressU32:
             return {AddressAccess::Write, 32u};
+        case IrOpcode::StoreAddressU32x2:
+            return {AddressAccess::Write, 32u, 2u};
+        case IrOpcode::StoreAddressU32x3:
+            return {AddressAccess::Write, 32u, 3u};
+        case IrOpcode::StoreAddressU32x4:
+            return {AddressAccess::Write, 32u, 4u};
         case IrOpcode::AddressAtomicSwap32:
         case IrOpcode::AddressAtomicCmpSwap32:
         case IrOpcode::AddressAtomicIAdd32:
@@ -804,10 +829,25 @@ ImageOpcodeInfo ImageOpcodeInfoOf(IrOpcode opcode) {
         case IrOpcode::ImageAtomicFCmpSwap32:
         case IrOpcode::ImageAtomicFMin32:
         case IrOpcode::ImageAtomicFMax32:
+        case IrOpcode::ImageAtomicSwap64:
+        case IrOpcode::ImageAtomicIAdd64:
+        case IrOpcode::ImageAtomicISub64:
+        case IrOpcode::ImageAtomicUMin64:
+        case IrOpcode::ImageAtomicUMax64:
+        case IrOpcode::ImageAtomicSMin64:
+        case IrOpcode::ImageAtomicSMax64:
+        case IrOpcode::ImageAtomicAnd64:
+        case IrOpcode::ImageAtomicOr64:
+        case IrOpcode::ImageAtomicXor64:
+        case IrOpcode::ImageAtomicCmpSwap64:
             return {ImageAccess::Atomic, ImageResourceClass::Storage, false};
         default:
             return {};
     }
+}
+
+bool IsImageAtomic64Opcode(IrOpcode opcode) {
+    return opcode >= IrOpcode::ImageAtomicSwap64 && opcode <= IrOpcode::ImageAtomicCmpSwap64;
 }
 
 bool IsFloat64Opcode(IrOpcode opcode) {
@@ -844,6 +884,7 @@ bool IrOpcodeHasSideEffects(IrOpcode opcode) {
         case IrOpcode::Reference:
         case IrOpcode::ReferenceU32:
         case IrOpcode::SetTessellationAttribute:
+        case IrOpcode::InterpolateHostP2:
         case IrOpcode::SetThreadBitScalarRegister:
         case IrOpcode::SetScalarMaskTag:
         case IrOpcode::SetScalarRegister:

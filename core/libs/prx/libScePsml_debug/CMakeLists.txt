@@ -1,12 +1,5 @@
-add_library(libScePsml_debug SHARED EXCLUDE_FROM_ALL Export.cpp)
-target_include_directories(libScePsml_debug PRIVATE ${LIBS_INCLUDE_DIR})
-configure_windows_unwind(libScePsml_debug)
-
-if(MINGW)
-    foreach(runtimeLinkFlag IN ITEMS -static-libgcc -static-libstdc++ -static)
-        string(REPLACE "${runtimeLinkFlag}" "" CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS}")
-    endforeach()
-endif()
+include(${CMAKE_CURRENT_SOURCE_DIR}/PsmlLibrary.cmake)
+add_sce_psml_library(libScePsml_debug)
 
 if(BUILD_TESTING)
     add_test_executable(guest_psml_tests ${LIBS_INCLUDE_DIR}/tests/GuestPsml.cpp)

@@ -26,6 +26,7 @@ struct Push {
     std::uint32_t linearBase;
     std::uint32_t columnBegin;
     std::uint32_t rowBegin;
+    std::uint32_t pipeBankXor;
 };
 
 Push decodePush(const std::vector<std::byte>& bytes) {
@@ -162,6 +163,13 @@ void RunTextureDetilerTests(const Context& context, const TextureDetilerTestAcce
     Require(access.pipelineCount() == pipelinesAfterWindow + 3, "render target detiling must use a separate pipeline");
     const auto specialization = access.lastSpecialization();
     Require(specialization[0] == 4 && specialization[1] == 65536 && specialization[2] == 2, "render target detiling must select its own swizzle family");
+
+    detiler.Dispatch(commands, TextureTileMode::kD4KBX, 4, source, 0, destination, 0, layout, false, 0);
+    const auto equationSpecialization = access.lastSpecialization();
+    Require(decodePush(access.lastDispatch().pushConstants).pipeBankXor == 0u, "a dispatch without a window passed a pipe/bank XOR");
+    detiler.Dispatch(commands, TextureTileMode::kD4KBX, 4, source, 0, destination, 0, layout, false, 0, false, {.pipeBankXor = 0xa00u});
+    Require(decodePush(access.lastDispatch().pushConstants).pipeBankXor == 0xa00u, "the window's pipe/bank XOR did not reach the detiling shader");
+    Require(equationSpecialization[0] == 4 && equationSpecialization[1] == 4096 && equationSpecialization[2] == 2, "SW_4KB_D_X detiling must select the equation family over 4 KiB blocks");
 
     reject([&] { detiler.Dispatch(VK_NULL_HANDLE, TextureTileMode::kStandard4KB, 4, source, 0, destination, 0, layout, 0); }, "active command buffer");
     reject([&] { detiler.Dispatch(commands, TextureTileMode::kStandard4KB, 4, VK_NULL_HANDLE, 0, destination, 0, layout, 0); }, "source and destination buffers");

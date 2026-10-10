@@ -22,6 +22,7 @@ using Align = void* (APS5_VABI *)(std::size_t, std::size_t);
 using Realign = void* (APS5_VABI *)(void*, std::size_t, std::size_t);
 using PosixAlign = int (APS5_VABI *)(void**, std::size_t, std::size_t);
 using Initialize = void (APS5_VABI *)();
+using Stats = int (APS5_VABI *)(void*);
 
 std::mutex heapMutex;
 std::array<void*, 10> heapApi{};
@@ -46,6 +47,7 @@ int APS5_VABI defaultPosixAlign(void** pointer, std::size_t alignment, std::size
     if (pointer == nullptr || alignment < sizeof(void*) || (alignment & (alignment - 1)) != 0) return 22;
     try { *pointer = defaultAlign(alignment, bytes); return 0; }
     catch (const std::bad_alloc&) { return 12; }
+    catch (const std::length_error&) { return 12; }
 }
 
 std::array<void*, 10> defaultApi() {
@@ -95,17 +97,23 @@ void requireAlignment(std::size_t alignment) {
 }
 
 void finalize() {
-    Initialize finalizeCallback;
+    Initialize finalizeCallback = nullptr;
     {
         std::lock_guard lock(heapMutex);
-        if (heapFailure) std::rethrow_exception(heapFailure);
-        if (heapFinalized) throw std::runtime_error("application heap: duplicate finalization");
+        if (heapFinalized || heapFailure) return;
         finalizeCallback = heapFinalize;
     }
     if (finalizeCallback != nullptr) finalizeCallback();
     std::lock_guard lock(heapMutex);
     heapFinalized = true;
 }
+
+struct HeapFinalizerRegistration {
+    HeapFinalizerRegistration() {
+        if (std::atexit(finalize) != 0) std::terminate();
+    }
+};
+const HeapFinalizerRegistration heapFinalizerRegistration;
 
 }
 
@@ -144,7 +152,6 @@ void ApplicationHeapInitialize_nid_no_patch(const void* processParameters) {
                 std::lock_guard lock(heapMutex);
                 heapFinalize = read<Initialize>(replacement, 0x18);
             }
-            if (std::atexit(finalize) != 0) throw std::runtime_error("application heap: cannot register finalization");
         } catch (...) {
             std::lock_guard lock(heapMutex);
             heapFailure = std::current_exception();
@@ -221,9 +228,24 @@ int ApplicationHeapPosixAlign_nid_no_patch(void** pointer, std::size_t alignment
     const auto align = callback<PosixAlign>(6);
     CallbackScope scope;
     void* result = nullptr;
-    if (align(&result, alignment, bytes) != 0) throw std::runtime_error("application heap: posix_memalign failed");
+    const int error = align(&result, alignment, bytes);
+    if (error != 0) return error;
     requireAllocation(result);
     if (reinterpret_cast<std::uintptr_t>(result) % alignment != 0) throw std::runtime_error("application heap: allocator returned a misaligned pointer");
     *pointer = result;
     return 0;
+}
+
+int ApplicationHeapStatsFast_nid_no_patch(void* stats) {
+    Stats statsFast;
+    {
+        std::lock_guard lock(heapMutex);
+        if (heapFailure) std::rethrow_exception(heapFailure);
+        if (heapFinalized) throw std::runtime_error("application heap: allocator has been finalized");
+        if (heapApi[0] == nullptr) throw std::runtime_error("application heap: allocator API is not registered");
+        if (heapApi[8] == nullptr) throw std::runtime_error("malloc_stats_fast: implemented only for an application allocator that provides it");
+        std::memcpy(&statsFast, &heapApi[8], sizeof(statsFast));
+    }
+    CallbackScope scope;
+    return statsFast(stats);
 }

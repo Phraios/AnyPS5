@@ -1,9 +1,12 @@
 #include "prx/libSceVideoOut/include/DisplayWindow.hpp"
 #include "prx/libSceAgcDriver/Execution/include/AspectFit.hpp"
+#include "prx/libSceAgcDriver/Execution/include/Driver.hpp"
 #include "prx/libkernel/AppMetadata/include/AppMetadata.hpp"
 #include "prx/libkernel/Time/include/Time.hpp"
+#include "Decoder/Png.hpp"
 #include "SDL_vulkan.h"
 #include <cstdio>
+#include <span>
 #include <stdexcept>
 #include <string>
 
@@ -17,6 +20,17 @@ namespace {
 
 void require(bool condition, const char* reason) {
     if (!condition) throw std::runtime_error(std::string("DisplayWindow: ") + reason);
+}
+
+void applyAppIcon(SDL_Window* window) {
+    if (!HasAppIcon_nid_postfix()) return;
+    const auto data = GetAppIconData_nid_postfix();
+    auto image = Decoder::Png::Decode(std::span<const std::uint8_t>(data.bytes, static_cast<std::size_t>(data.size)));
+    require(image.has_value(), "failed to decode icon0.png");
+    SDL_Surface* icon = SDL_CreateRGBSurfaceWithFormatFrom(image->pixels.data(), static_cast<int>(image->width), static_cast<int>(image->height), 32, static_cast<int>(image->width * 4), SDL_PIXELFORMAT_RGBA32);
+    require(icon != nullptr, SDL_GetError());
+    SDL_SetWindowIcon(window, icon);
+    SDL_FreeSurface(icon);
 }
 
 #ifdef _WIN32
@@ -45,9 +59,12 @@ void DisplayWindow::create(std::uint32_t sourceWidth, std::uint32_t sourceHeight
     const auto initialSize = AgcDriver::ComputeContainSize_nid_postfix(sourceWidth, sourceHeight, boundsWidth, boundsHeight, true);
     require(initialSize.width >= DisplayWindowMinimumWidth && initialSize.height >= DisplayWindowMinimumHeight, "initial window extent is smaller than the minimum");
     const auto title = GetAppTitle_nid_postfix();
+    AgcDriverLockVulkanLoader_nid_postfix();
     window = SDL_CreateWindow(title.value, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, static_cast<int>(initialSize.width), static_cast<int>(initialSize.height), SDL_WINDOW_SHOWN | SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
+    AgcDriverUnlockVulkanLoader_nid_postfix();
     require(window != nullptr, SDL_GetError());
     SDL_SetWindowMinimumSize(window, static_cast<int>(DisplayWindowMinimumWidth), static_cast<int>(DisplayWindowMinimumHeight));
+    applyAppIcon(window);
     installSubclass();
 }
 

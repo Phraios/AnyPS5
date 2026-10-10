@@ -1,3 +1,4 @@
+#include "SceTypes.hpp"
 #include "prx/libc/include/general/VabiMacros.hpp"
 #include "prx/libkernel/Apr/include/AprCommandBuffer.hpp"
 #include <array>
@@ -15,6 +16,8 @@ extern "C" {
 int APS5_VABI sceAmprCommandBufferConstructor(Apr::CommandBufferObject*);
 int APS5_VABI sceAmprAprCommandBufferConstructor(Apr::CommandBufferObject*, std::uint64_t*, std::uint64_t*);
 int APS5_VABI sceAmprCommandBufferSetBuffer(Apr::CommandBufferObject*, void*, std::uint32_t);
+int APS5_VABI sceAmprCommandBufferReset(Apr::CommandBufferObject*);
+void* APS5_VABI sceAmprCommandBufferClearBuffer(Apr::CommandBufferObject*);
 std::uint32_t APS5_VABI sceAmprCommandBufferGetCurrentOffset(const Apr::CommandBufferObject*);
 std::uint32_t APS5_VABI sceAmprCommandBufferGetNumCommands(const Apr::CommandBufferObject*);
 int APS5_VABI sceAmprCommandBufferWriteAddressOnCompletion(Apr::CommandBufferObject*, volatile std::uint64_t*, std::uint64_t);
@@ -112,6 +115,15 @@ std::int64_t APS5_VABI sceAmprAmmMeasureAmmCommandSizeModifyProtect(std::uint64_
 std::int64_t APS5_VABI sceAmprAmmMeasureAmmCommandSizeModifyProtectWithGpuMaskId(std::uint64_t, std::uint64_t, std::int32_t, std::int32_t, std::uint8_t);
 std::int64_t APS5_VABI sceAmprAmmMeasureAmmCommandSizeModifyMtypeProtect(std::uint64_t, std::uint64_t, std::int32_t, std::int32_t, std::int32_t);
 std::int64_t APS5_VABI sceAmprAmmMeasureAmmCommandSizeModifyMtypeProtectWithGpuMaskId(std::uint64_t, std::uint64_t, std::int32_t, std::int32_t, std::int32_t, std::uint8_t);
+int APS5_VABI sceKernelCreateEqueue(KernelEqueue*, const char*);
+int APS5_VABI sceKernelDeleteEqueue(KernelEqueue);
+int APS5_VABI sceKernelWaitEqueue(KernelEqueue, KernelEvent*, int, int*, const KernelUseconds*);
+int APS5_VABI sceKernelAddAmprEvent(KernelEqueue, int, void*);
+int APS5_VABI sceKernelDeleteAmprEvent(KernelEqueue, int);
+int APS5_VABI sceKernelGetEventFilter(const KernelEvent*);
+std::uintptr_t APS5_VABI sceKernelGetEventId(const KernelEvent*);
+std::intptr_t APS5_VABI sceKernelGetEventData(const KernelEvent*);
+void* APS5_VABI sceKernelGetEventUserData(const KernelEvent*);
 }
 
 static void RequireAt(bool value, int line) {
@@ -245,6 +257,24 @@ void TestSubmission() {
     Require(recorder.Commands() == 8);
     Require(sceKernelAprSubmitCommandBuffer(&recorder.buffer, 0) == 0);
     Require(first == 0x1111 && second == 0x2222);
+}
+
+void TestKernelEventQueue() {
+    KernelEqueue eq = 0;
+    int userData = 0;
+    Require(sceKernelCreateEqueue(&eq, "ampr") == 0);
+    Require(sceKernelAddAmprEvent(eq, 7, &userData) == 0);
+    Recorder recorder;
+    Require(sceAmprCommandBufferWriteKernelEventQueue_04_00(&recorder.buffer, static_cast<std::uint64_t>(eq), 7, 0x1234, 0) == 0);
+    Require(sceKernelAprSubmitCommandBuffer(&recorder.buffer, 0) == 0);
+    KernelEvent event{};
+    int count = 0;
+    const KernelUseconds poll = 0;
+    Require(sceKernelWaitEqueue(eq, &event, 1, &count, &poll) == 0 && count == 1);
+    Require(sceKernelGetEventFilter(&event) == -25);
+    Require(sceKernelGetEventId(&event) == 7 && sceKernelGetEventData(&event) == 0x1234 && sceKernelGetEventUserData(&event) == &userData);
+    Require(sceKernelDeleteAmprEvent(eq, 7) == 0);
+    Require(sceKernelDeleteEqueue(eq) == 0);
 }
 
 void TestWaits() {
@@ -418,6 +448,15 @@ void TestVersionedCounters() {
     Require(sceAmprMeasureCommandSizeWriteCounter_04_00(0, size4, 0, 5) == rejected);
 }
 
+void TestClearBuffer() {
+    Recorder recorder;
+    Require(sceAmprCommandBufferNop(&recorder.buffer, 1) == 0);
+    Require(recorder.Offset() != 0 && recorder.Commands() == 1);
+    Require(sceAmprCommandBufferClearBuffer(&recorder.buffer) == recorder.memory.data());
+    Require(recorder.buffer.base == nullptr && recorder.buffer.size == 0 && recorder.Offset() == 0 && recorder.Commands() == 0);
+    Require(sceAmprCommandBufferClearBuffer(&recorder.buffer) == nullptr);
+}
+
 void TestConstructed() {
     Recorder recorder;
     const std::uint8_t payload[5] = {1, 2, 3, 4, 5};
@@ -474,6 +513,43 @@ bool MatchesFile(const std::uint8_t* data, std::size_t offset, std::size_t bytes
         if (data[index] != FileByte(offset + index)) return false;
     }
     return true;
+}
+
+void TestZeroFilledBuffer() {
+    const char* path = "ampr_zero_filled.bin";
+    {
+        std::ofstream file(path, std::ios::binary);
+        for (std::size_t offset = 0; offset < 256; ++offset) file.put(static_cast<char>(FileByte(offset)));
+    }
+    std::uint32_t fileId = 0;
+    std::uint32_t failed = 0;
+    Require(sceKernelAprResolveFilepathsToIds(&path, 1, &fileId, &failed) == 0);
+    KernelEqueue eq = 0;
+    Require(sceKernelCreateEqueue(&eq, "ampr") == 0);
+    Require(sceKernelAddAmprEvent(eq, 0, nullptr) == 0);
+
+    alignas(8) std::array<std::uint8_t, 256> memory{};
+    Apr::CommandBufferObject buffer{};
+    std::uint64_t gatherState = 0;
+    std::uint64_t scatterState = 0;
+    Require(sceAmprCommandBufferSetBuffer(&buffer, memory.data(), static_cast<std::uint32_t>(memory.size())) == 0);
+    Require(sceAmprCommandBufferReset(&buffer) == 0);
+    std::array<std::uint8_t, 32> data{};
+    std::uint64_t done = 0;
+    Require(sceAmprAprCommandBufferReadFile(&buffer, &gatherState, &scatterState, fileId, data.data(), data.size(), 64) == 0);
+    Require(sceAmprCommandBufferWriteAddressOnCompletion(&buffer, &done, 0x1234567) == 0);
+    Require(sceAmprCommandBufferWriteKernelEventQueue_04_00(&buffer, static_cast<std::uint64_t>(eq), 0, 0, 0) == 0);
+    Require(sceKernelAprSubmitCommandBuffer(&buffer, 1) == 0);
+    Require(MatchesFile(data.data(), 64, data.size()) && done == 0x1234567);
+
+    KernelEvent event{};
+    int count = 0;
+    const KernelUseconds poll = 0;
+    Require(sceKernelWaitEqueue(eq, &event, 1, &count, &poll) == 0 && count == 1);
+    Require(sceKernelGetEventFilter(&event) == -25 && sceKernelGetEventId(&event) == 0);
+    Require(sceKernelDeleteAmprEvent(eq, 0) == 0);
+    Require(sceKernelDeleteEqueue(eq) == 0);
+    std::remove(path);
 }
 
 void TestGatherScatter() {
@@ -902,13 +978,16 @@ int main() {
     TestRejectedArguments();
     TestFullBuffer();
     TestSubmission();
+    TestKernelEventQueue();
     TestWaits();
     TestCounters();
     TestRejectedWaitsAndCounters();
     TestNops();
     TestVersionedCommands();
     TestVersionedCounters();
+    TestClearBuffer();
     TestConstructed();
+    TestZeroFilledBuffer();
     TestGatherScatter();
     TestAmm();
     TestAmmRemapAndProtect();

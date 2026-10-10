@@ -19,7 +19,7 @@ CHARSET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+-"
 SUFFIX = bytes([0x51, 0x8D, 0x64, 0xA6, 0x35, 0xDE, 0xD8, 0xC1,
                 0xE6, 0xB0, 0x39, 0xB1, 0xC3, 0xE5, 0x52, 0x30])
 ALIAS = re.compile(r'APS5_EXPORT\("([A-Za-z0-9+\-]{11})",\s*(\w*[Uu]nknown\w*)\)')
-DEFINITION = re.compile(r"\bAPS5_VABI\s+(\w+)\s*\([^;{]*\)\s*(?:noexcept\s*)?\{")
+DEFINITION = re.compile(r"\bAPS5_VABI\s+(\w+)\s*\([^;{]*\)\s*(?:noexcept\s*)?(?:try\s*)?\{")
 NID_POSTFIX = "_nid_postfix"
 
 
@@ -41,7 +41,13 @@ def load_db(path):
     if not path.exists():
         path.parent.mkdir(parents=True, exist_ok=True)
         print("downloading NID database to %s ..." % path, file=sys.stderr)
-        urllib.request.urlretrieve(DB_URL, str(path))
+        with tempfile.NamedTemporaryFile(dir=path.parent, prefix=path.name + ".", suffix=".tmp", delete=False) as download:
+            temporary = Path(download.name)
+        try:
+            urllib.request.urlretrieve(DB_URL, str(temporary))
+            temporary.replace(path)
+        finally:
+            temporary.unlink(missing_ok=True)
     db = {}
     with open(path, errors="replace") as handle:
         for line in handle:

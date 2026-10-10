@@ -13,6 +13,7 @@
 
 #include "SDL.h"
 #include "SceTypes.hpp"
+#include "prx/libc/include/PreciseWait.hpp"
 #include "prx/libkernel/Time/include/Time.hpp"
 
 static constexpr int PORT_TYPE_MAIN = 0;
@@ -88,13 +89,14 @@ struct Port {
     int channels = 0;
     int volume[8] = {};
     int mixLevel = DEFAULT_VOLUME;
-    std::uint64_t lastOutputTime = 0;
     std::uint64_t lastDataOutputTime = 0;
+    std::uint64_t virtualQueueEnd = 0;
     SDL_AudioDeviceID device = 0;
     SDL_AudioSpec spec = {};
 };
 
 static std::mutex g_mutex;
+static std::mutex g_outputMutex;
 static Port g_ports[PORTS_MAX];
 static bool g_sdlInitialized = false;
 
@@ -190,11 +192,13 @@ static const void* prepareBuffer(const Port& port, const void* data, std::vector
     return buf.data();
 }
 
-static void queueAudio(Port& port, const void* data) {
-    // Without an SDL device there is nothing to queue: the callers already sleep for the block's
-    // duration so the game's timing holds. A null pointer is the documented way to wait until the
-    // port's queued audio has been output (sceAudioOutOutput(handle, NULL)); it queues nothing.
-    if (port.device == 0) return;
+static void sleepUs(std::unique_lock<std::mutex>& lock, std::uint64_t us) {
+    lock.unlock();
+    PreciseSleepUs(us);
+    lock.lock();
+}
+
+static void queueAudio(Port& port, const void* data, std::unique_lock<std::mutex>& lock) {
     if (data == nullptr) {
         const std::uint64_t waitStart = sceKernelGetProcessTime();
         while (SDL_GetQueuedAudioSize(port.device) > 0) {
@@ -202,10 +206,7 @@ static void queueAudio(Port& port, const void* data) {
                 SDL_ClearQueuedAudio(port.device);
                 break;
             }
-            struct timespec req{};
-            req.tv_sec = 0;
-            req.tv_nsec = static_cast<long>(DRAIN_SLEEP_US * 1000ULL);
-            nanosleep(&req, nullptr);
+            sleepUs(lock, DRAIN_SLEEP_US);
         }
         return;
     }
@@ -255,16 +256,25 @@ static void queueAudio(Port& port, const void* data) {
             SDL_ClearQueuedAudio(port.device);
             break;
         }
-        struct timespec req{};
-        req.tv_sec = 0;
-        req.tv_nsec = static_cast<long>(DRAIN_SLEEP_US * 1000ULL);
-        nanosleep(&req, nullptr);
+        sleepUs(lock, DRAIN_SLEEP_US);
     }
 
     if (SDL_QueueAudio(port.device, queueData, queueSize) < 0) {
         throw std::runtime_error(std::string("SDL_QueueAudio: ") + SDL_GetError());
     }
     // APS5_LOG_OUT("device=%u type=%d bytes=%u queued=%u", port.device, port.type, queueSize, SDL_GetQueuedAudioSize(port.device));
+}
+
+static void paceVirtualPort(Port& port, bool hasData, std::unique_lock<std::mutex>& lock) {
+    const std::uint64_t now = sceKernelGetProcessTime();
+    const auto queued = static_cast<std::int64_t>(port.virtualQueueEnd - now);
+    if (queued <= 0) port.virtualQueueEnd = now;
+    if (!hasData) {
+        if (queued > 0) sleepUs(lock, static_cast<std::uint64_t>(queued));
+        return;
+    }
+    if (queued > static_cast<std::int64_t>(TARGET_LATENCY_US)) sleepUs(lock, static_cast<std::uint64_t>(queued) - TARGET_LATENCY_US);
+    port.virtualQueueEnd += (1000000ULL * port.samplesNum) / port.freq;
 }
 
 static bool portTypeValid(int type) {
@@ -328,8 +338,8 @@ int APS5_VABI sceAudioOutOpen(int userId, int type, int index, std::uint32_t len
             port.freq = freq;
             port.format = format;
             port.channels = channelsForFormat(format);
-            port.lastOutputTime = 0;
             port.lastDataOutputTime = 0;
+            port.virtualQueueEnd = sceKernelGetProcessTime();
             port.mixLevel = type == PORT_TYPE_PADSPK ? DEFAULT_PADSPK_MIX_LEVEL : DEFAULT_VOLUME;
             for (int c = 0; c < port.channels; c++) {
                 port.volume[c] = DEFAULT_VOLUME;
@@ -346,6 +356,7 @@ int APS5_VABI sceAudioOutOpen(int userId, int type, int index, std::uint32_t len
 }
 
 int APS5_VABI sceAudioOutClose(int handle) {
+    std::lock_guard<std::mutex> outputLock(g_outputMutex);
     std::lock_guard<std::mutex> lock(g_mutex);
     Port* port = getPort(handle);
     if (port == nullptr) {
@@ -357,26 +368,19 @@ int APS5_VABI sceAudioOutClose(int handle) {
 }
 
 int APS5_VABI sceAudioOutOutput(int handle, const void* ptr) {
-    std::lock_guard<std::mutex> lock(g_mutex);
+    std::lock_guard<std::mutex> outputLock(g_outputMutex);
+    std::unique_lock<std::mutex> lock(g_mutex);
     Port* port = getPort(handle);
     if (port == nullptr) {
         return -2144993277;
     }
 
-    const std::uint64_t blockUs = (1000000ULL * port->samplesNum) / port->freq;
-    const std::uint64_t now = sceKernelGetProcessTime();
-    const std::uint64_t next = port->lastOutputTime + blockUs;
-    if (next > now && port->device == 0) {
-        const std::uint64_t waitUs = next - now;
-        struct timespec req{};
-        req.tv_sec = static_cast<time_t>(waitUs / 1000000ULL);
-        req.tv_nsec = static_cast<long>((waitUs % 1000000ULL) * 1000ULL);
-        nanosleep(&req, nullptr);
+    if (port->device == 0) {
+        paceVirtualPort(*port, ptr != nullptr, lock);
+    } else {
+        queueAudio(*port, ptr, lock);
     }
-
-    queueAudio(*port, ptr);
-    port->lastOutputTime = sceKernelGetProcessTime();
-    if (ptr != nullptr) port->lastDataOutputTime = port->lastOutputTime;
+    if (ptr != nullptr) port->lastDataOutputTime = sceKernelGetProcessTime();
     return static_cast<int>(port->samplesNum);
 }
 
@@ -385,7 +389,8 @@ int APS5_VABI sceAudioOutOutputs(AudioOutOutputParam* param, std::uint32_t num) 
         return -2144993276;
     }
 
-    std::lock_guard<std::mutex> lock(g_mutex);
+    std::lock_guard<std::mutex> outputLock(g_outputMutex);
+    std::unique_lock<std::mutex> lock(g_mutex);
 
     for (std::uint32_t i = 0; i < num; i++) {
         if (getPort(param[i].handle) == nullptr) {
@@ -394,44 +399,18 @@ int APS5_VABI sceAudioOutOutputs(AudioOutOutputParam* param, std::uint32_t num) 
     }
 
     Port& first = *getPort(param[0].handle);
-    const std::uint64_t blockUs = (1000000ULL * first.samplesNum) / first.freq;
-    const std::uint64_t now = sceKernelGetProcessTime();
-
-    std::uint64_t maxWait = 0;
     for (std::uint32_t i = 0; i < num; i++) {
-        Port& p = *getPort(param[i].handle);
-        const std::uint64_t next = p.lastOutputTime + blockUs;
-        const std::uint64_t wait = next > now ? next - now : 0;
-        if (wait > maxWait) {
-            maxWait = wait;
+        Port& port = *getPort(param[i].handle);
+        if (port.device == 0) {
+            paceVirtualPort(port, param[i].ptr != nullptr, lock);
+        } else {
+            queueAudio(port, param[i].ptr, lock);
         }
-    }
-
-    bool anyDevice = false;
-    for (std::uint32_t i = 0; i < num; i++) {
-        if (getPort(param[i].handle)->device != 0) {
-            anyDevice = true;
-            break;
-        }
-    }
-
-    if (maxWait != 0 && !anyDevice) {
-        struct timespec req{};
-        req.tv_sec = static_cast<time_t>(maxWait / 1000000ULL);
-        req.tv_nsec = static_cast<long>((maxWait % 1000000ULL) * 1000ULL);
-        nanosleep(&req, nullptr);
-    }
-
-    for (std::uint32_t i = 0; i < num; i++) {
-        if (auto* port = getPort(param[i].handle)) queueAudio(*port, param[i].ptr);
     }
 
     const std::uint64_t done = sceKernelGetProcessTime();
     for (std::uint32_t i = 0; i < num; i++) {
-        if (auto* port = getPort(param[i].handle)) {
-            port->lastOutputTime = done;
-            if (param[i].ptr != nullptr) port->lastDataOutputTime = done;
-        }
+        if (param[i].ptr != nullptr) getPort(param[i].handle)->lastDataOutputTime = done;
     }
 
     return static_cast<int>(first.samplesNum);
@@ -533,6 +512,26 @@ int APS5_VABI sceAudioOutSetMixLevelPadSpk(int handle, int mixLevel) {
         throw std::runtime_error("sceAudioOutSetMixLevelPadSpk: negative mix level not supported");
     }
     port->mixLevel = mixLevel;
+    return 0;
+}
+
+int APS5_VABI sceAudioOutExClose() {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceAudioOutExConfigureOutput() {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceAudioOutExGetMonitorInfo() {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceAudioOutExOpen() {
+    NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 

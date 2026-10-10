@@ -205,6 +205,19 @@ struct ModuleSegmentInfo {
     std::int32_t prot;
 };
 
+struct ModuleInfo {
+    std::uint64_t st_size;
+    char name[256];
+    ModuleSegmentInfo segments[4];
+    std::uint32_t segment_count;
+    std::uint8_t fingerprint[20];
+};
+static_assert(offsetof(ModuleInfo, name) == 0x8);
+static_assert(offsetof(ModuleInfo, segments) == 0x108);
+static_assert(offsetof(ModuleInfo, segment_count) == 0x148);
+static_assert(offsetof(ModuleInfo, fingerprint) == 0x14C);
+static_assert(sizeof(ModuleInfo) == 0x160);
+
 struct ModuleInfoEx {
     std::uint64_t st_size;
     char name[256];
@@ -532,6 +545,13 @@ struct Audio3dOpenParameters {
     std::uint32_t buffer_mode;
     std::uint32_t pad;
     std::uint32_t num_beds;
+};
+
+struct Audio3dAttribute {
+    std::uint32_t attribute_id;
+    std::uint32_t pad;
+    const void* value;
+    std::uint64_t value_size;
 };
 
 using AudioPropagationHandle = std::uint64_t;
@@ -1219,6 +1239,9 @@ using NetCtlCallback = void (*)(int, void*);
 struct HttpEpoll {};
 using HttpEpollHandle = HttpEpoll*;
 using HttpsCallback = int (*)(int, unsigned int, void* const*, int, void*);
+using HttpRedirectCallback = int (*)(int, std::int32_t, std::int32_t*, const char*, void*);
+using HttpCookieRecvCallback = int (*)(int, const char*, const char*, std::uint64_t, void*);
+using HttpAuthInfoCallback = int (*)(int, int, const char*, char*, char*, int, std::uint8_t**, std::uint64_t*, int*, void*);
 
 struct HttpNBEvent { std::uint8_t opaque[64]; };
 
@@ -1243,6 +1266,14 @@ struct Http2AsyncResult {
     void* reserved;
 };
 
+struct Http2AsyncOption {
+    KernelEqueue equeue;
+    int user_event_id;
+    std::uint8_t padding[4];
+    void* user_data;
+    void* reserved;
+};
+
 struct NpTitleId { char data[13]; char pad[3]; };
 struct NpTitleSecret { std::uint8_t data[128]; };
 struct NpContentRestriction { std::uint8_t opaque[128]; };
@@ -1264,6 +1295,10 @@ struct NpEntitlementAccessAddcontEntitlementInfo {
     NpUnifiedEntitlementLabel entitlement_label;
     std::uint32_t package_type;
     std::uint32_t download_status;
+};
+
+struct NpEntitlementAccessEntitlementKey {
+    std::uint8_t data[16];
 };
 
 
@@ -1375,7 +1410,7 @@ struct SaveDataMountInfo {
 };
 
 struct SceSaveDataTitleId { char data[10]; char pad[2]; };
-struct SceSaveDataDirName { char data[33]; char pad[3]; };
+struct SceSaveDataDirName { char data[32]; };
 struct SaveDataSearchInfo { std::uint8_t opaque[128]; };
 struct SaveDataMemoryData { void* buf; std::size_t buf_size; std::size_t offset; };
 
@@ -1729,6 +1764,8 @@ struct SystemGestureTouchEvent { std::uint8_t reserve[168]; };
 
 struct UserServiceLoginUserIdList { int user_id[4]; };
 
+struct UserServiceRegisteredUserIdList { int user_id[16]; };
+
 struct SceUserServiceEvent {
     std::uint32_t event_type;
     int user_id;
@@ -1810,6 +1847,19 @@ struct VideoOutOutputStatus {
     std::uint64_t reserved[3] = {};
 };
 
+struct VideoOutResolutionStatus {
+    std::uint32_t fullWidth = 0;
+    std::uint32_t fullHeight = 0;
+    std::uint32_t paneWidth = 0;
+    std::uint32_t paneHeight = 0;
+    std::uint64_t refreshRate = 0;
+    float screenSizeInInch = 0.0f;
+    std::uint16_t flags = 0;
+    std::uint16_t reserved0 = 0;
+    std::uint32_t reserved1[3] = {};
+};
+static_assert(sizeof(VideoOutResolutionStatus) == 48 && offsetof(VideoOutResolutionStatus, refreshRate) == 16 && offsetof(VideoOutResolutionStatus, screenSizeInInch) == 24);
+
 struct VideoOutOutputOptions { std::uint32_t internalData[16] = {}; };
 
 struct VideoOutColorSettings {
@@ -1835,12 +1885,6 @@ struct LibcHeapInfo {
 };
 
 using Info = LibcHeapInfo;
-
-#define VA_ARGS \
-    std::uint64_t rdi, std::uint64_t rsi, std::uint64_t rdx, std::uint64_t rcx, \
-    std::uint64_t r8, std::uint64_t r9, std::uint64_t overflow_arg_area, \
-    __m128 xmm0, __m128 xmm1, __m128 xmm2, __m128 xmm3, \
-    __m128 xmm4, __m128 xmm5, __m128 xmm6, __m128 xmm7, ...
 
 struct Packet {
     std::uint32_t* addr;
